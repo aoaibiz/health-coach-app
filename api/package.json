@@ -1,0 +1,25 @@
+{
+  "name": "health-app-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker auth + account + per-user data backend for the health app (Phase-1 foundation). Standalone Worker; the static app + its Pages Functions are untouched.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate:local": "wrangler d1 migrations apply health_app_db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply health_app_db --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.6.4",
+    "@cloudflare/workers-types": "^4.20250109.0",
+    "typescript": "^5.5.3",
+    "vitest": "2.1.9",
+    "wrangler": "^4.101.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["workerd", "esbuild"]
+  }
+}

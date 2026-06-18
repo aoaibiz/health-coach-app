@@ -1,0 +1,33 @@
+# dependencies
+/node_modules
+
+# next.js
+/.next/
+/out/
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# server build output (compiled functions for the Node backend)
+/dist/
+
+# wrangler local state (if deploying the static export via Pages/wrangler)
+/.wrangler/
+
+# secrets / local env — NEVER commit
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+# ...but DO commit the placeholder templates (no real values):
+!.env.example
+!.dev.vars.example
+
+# internal runtime artifact — NEVER publish
+outbox.jsonl
+
+# misc
+.DS_Store
+*.log
+npm-debug.log*

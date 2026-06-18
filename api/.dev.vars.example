@@ -1,0 +1,18 @@
+# Example local dev secrets for `wrangler dev` (the api/ Worker).
+#
+# Copy this file to `.dev.vars` (which is gitignored — NEVER commit it) and fill
+# in real values. These are LOCAL DEV placeholders only; production secrets are
+# set with `wrangler secret put <NAME> --env production` and never live in a file.
+#
+# See SECRETS.md for the authoritative list and descriptions.
+
+# Google OAuth 2.0 / OIDC web client (only needed for Google login; email+password
+# and the data APIs work fully WITHOUT these).
+GOOGLE_CLIENT_ID=dev-placeholder-client-id
+GOOGLE_CLIENT_SECRET=dev-placeholder-client-secret
+
+# Web Push (VAPID) PRIVATE key, as a JWK string. Only needed if you exercise the
+# push-sending endpoints locally. Generate a keypair (see the root README) and
+# paste the PRIVATE JWK here; the matching PUBLIC key goes in wrangler.toml
+# (VAPID_PUBLIC_KEY). NEVER commit the real private key.
+# VAPID_PRIVATE_JWK={"kty":"EC","crv":"P-256","d":"...","x":"...","y":"..."}

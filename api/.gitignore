@@ -1,0 +1,22 @@
+# dependencies
+/node_modules
+
+# wrangler local state (local D1 DB, caches)
+/.wrangler/
+
+# LOCAL DEV SECRETS — never commit. Real secrets go via `wrangler secret put`.
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+# ...but DO commit the placeholder templates (no real values):
+!.dev.vars.example
+!.env.example
+
+# typescript / build
+*.tsbuildinfo
+dist/
+
+# misc
+.DS_Store
+*.log

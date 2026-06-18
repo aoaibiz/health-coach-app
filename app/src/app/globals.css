@@ -1,0 +1,90 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Lock the page to the viewport: the document/body never scrolls. Scrolling
+     happens inside the app (the chat message list, or a sub-page's main).
+     overscroll-behavior also kills mobile rubber-band scroll-chaining. */
+  html,
+  body {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-900 antialiased;
+    @apply transition-colors duration-300;
+  }
+
+  .dark body {
+    @apply bg-navy-950 text-navy-50;
+  }
+
+  /* Keep numeric inputs comfortable on mobile, no spinners stealing space. */
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+  }
+}
+
+@layer components {
+  /* A reusable surface for cards, sheets, and panels. */
+  .surface {
+    @apply rounded-2xl bg-white shadow-card border border-slate-200/70;
+  }
+  .dark .surface {
+    @apply bg-navy-900 shadow-card-dark border-navy-800;
+  }
+
+  .field {
+    @apply w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-base
+      text-slate-900 placeholder-slate-400 outline-none transition
+      focus:border-accent focus:ring-2 focus:ring-accent/30;
+  }
+  .dark .field {
+    @apply border-navy-700 bg-navy-800 text-navy-50 placeholder-navy-300/50
+      focus:border-accent-light focus:ring-accent-light/30;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-accent px-4 py-2.5
+      text-sm font-semibold text-white shadow-sm transition
+      active:scale-[0.98] hover:bg-accent-dark disabled:opacity-50 disabled:active:scale-100;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2
+      text-sm font-medium text-slate-600 transition hover:bg-slate-100 active:scale-[0.98];
+  }
+  .dark .btn-ghost {
+    @apply text-navy-200 hover:bg-navy-800;
+  }
+
+  .chip {
+    @apply inline-flex items-center justify-center rounded-full px-3.5 py-1.5
+      text-sm font-medium transition active:scale-[0.97];
+  }
+}
+
+/* Hide scrollbars on the horizontal chip rows while keeping scroll. */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

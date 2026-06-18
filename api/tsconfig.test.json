@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // The test runner provides these ambient types for the `cloudflare:test`
+    // module (env/SELF/applyD1Migrations) + the worker types used in tests.
+    "types": [
+      "@cloudflare/workers-types",
+      "@cloudflare/vitest-pool-workers"
+    ]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

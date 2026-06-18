@@ -1,0 +1,23 @@
+{
+  // Compile ONLY the backend functions (provider + grounding + pure handler) to
+  // CommonJS in ./dist so server/index.mjs can import them under plain Node with
+  // no extra runtime deps. The Next.js frontend is built separately (next build).
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2020"],
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "outDir": "./dist",
+    "rootDir": ".",
+    "declaration": false,
+    "sourceMap": false,
+    "types": ["node"],
+    "noEmit": false
+  },
+  "include": ["functions/_lib/**/*.ts", "functions/_data/**/*.ts", "functions/_llm/**/*.ts", "functions/api/**/*.ts"],
+  "exclude": ["functions/_tests/**", "node_modules"]
+}

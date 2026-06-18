@@ -1,0 +1,89 @@
+# Cloudflare Worker config for the health-coach auth + account + data backend.
+#
+# >>> SELF-HOSTERS: fill in every <PLACEHOLDER> value below for your own
+# >>> Cloudflare account before deploying (database_id, the origins, the VAPID
+# >>> public key, the VAPID subject, and the production route hostname). See the
+# >>> root README "Self-host quickstart" for how to obtain each one.
+#
+# This is a STANDALONE Worker, deliberately separate from the static app
+# (../app, Pages + Pages Functions). It owns auth, accounts and per-user data;
+# the app will call it cross-origin with credentials.
+#
+# SECRETS ARE NOT STORED HERE. The values below are non-secret config only.
+# Secrets (see SECRETS.md) are injected at deploy time with `wrangler secret put`
+# and are NEVER committed. Local dev secrets go in .dev.vars (gitignored).
+
+name = "health-app-api"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Cron trigger: hourly GC of expired sessions + oauth_states (the `scheduled`
+# handler calls purgeExpired). Keeps both tables from growing unbounded even when
+# OAuth is idle. Non-secret; runs in prod once deployed.
+[triggers]
+crons = ["0 * * * *"]
+
+# Non-secret runtime config. App origin is locked here for CORS; the OAuth
+# redirect URI and the public API origin are derived from these. Override per
+# environment as needed. NONE of these are secrets.
+[vars]
+APP_ORIGIN = "http://localhost:3000"
+API_ORIGIN = "http://localhost:8787"
+GOOGLE_REDIRECT_PATH = "/auth/google/callback"
+COOKIE_DOMAIN = ""
+# "true" only in production (over HTTPS). Local dev over http leaves it "false"
+# so the Secure cookie attribute doesn't drop the cookie on http://localhost.
+COOKIE_SECURE = "false"
+SESSION_TTL_SECONDS = "2592000"   # 30 days
+ENVIRONMENT = "development"
+# Web Push (VAPID) — NON-secret config. The public key is the browser's
+# applicationServerKey (ships to every client); the subject is a contact mailto.
+# The PRIVATE key is a Worker secret (VAPID_PRIVATE_JWK), NEVER here.
+# Generate a VAPID keypair (see README "Self-host quickstart") and paste the
+# PUBLIC key here. The matching PRIVATE key is a Worker secret (VAPID_PRIVATE_JWK),
+# NEVER here.
+VAPID_PUBLIC_KEY = "<YOUR_VAPID_PUBLIC_KEY>"
+VAPID_SUBJECT = "mailto:you@example.com"
+
+# D1 (SQL) binding. Run `wrangler d1 create health_app_db`, then paste the
+# returned `database_id` below. For local dev wrangler uses a local
+# SQLite-backed DB under .wrangler/ and the id is not required.
+[[d1_databases]]
+binding = "DB"
+database_name = "health_app_db"
+database_id = "<YOUR_D1_DATABASE_ID>"
+migrations_dir = "migrations"
+
+# ---- Production environment (fill in database_id + set secrets) -------------
+[env.production.vars]
+APP_ORIGIN = "https://<your-app-host>"
+# Public origin of THIS Worker. The OAuth redirect_uri is API_ORIGIN +
+# GOOGLE_REDIRECT_PATH, so this must EXACTLY match the custom domain below and
+# the redirect URI registered in the Google Cloud OAuth client.
+API_ORIGIN = "https://<your-api-host>"
+GOOGLE_REDIRECT_PATH = "/auth/google/callback"
+# Host-only session cookie: scoped to the API host (<your-api-host>) only —
+# deliberately NOT widened to the parent domain. As long as the app and API are
+# the SAME site (e.g. app.example.com + api.example.com share example.com),
+# SameSite=Lax still lets the app's credentialed fetches carry the cookie.
+COOKIE_DOMAIN = ""
+COOKIE_SECURE = "true"
+SESSION_TTL_SECONDS = "2592000"
+ENVIRONMENT = "production"
+# Web Push (VAPID) — same NON-secret config in prod. Private key stays a secret.
+VAPID_PUBLIC_KEY = "<YOUR_VAPID_PUBLIC_KEY>"
+VAPID_SUBJECT = "mailto:you@example.com"
+
+# Custom domain. `custom_domain = true` makes Cloudflare provision the DNS
+# record + edge cert for this hostname and bind it to this Worker. Replace with
+# your own API hostname (must be on a zone in your Cloudflare account).
+[[env.production.routes]]
+pattern = "<your-api-host>"
+custom_domain = true
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "health_app_db"
+database_id = "<YOUR_D1_DATABASE_ID>"
+migrations_dir = "migrations"
