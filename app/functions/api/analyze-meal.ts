@@ -5,21 +5,23 @@
 // marked 推定/参考. We ALWAYS return a number with its source — never the old
 // "推定できませんでした" dead-end — and an estimate is never shown as a DB value.
 //
-// ┌─ ACTIVE RUNTIME PATH ───────────────────────────────────────────────────┐
-// │ The app now runs on the Node backend in ../../server/index.mjs, which     │
-// │ builds a CodexProvider (Codex CLI subscription — GPT-5.5 vision, NO paid   │
-// │ API / NO API key) and calls the PURE handleAnalyzeMeal() below.           │
-// │                                                                           │
-// │ The Cloudflare Pages `onRequestPost` + AnthropicProvider below are        │
-// │ LEGACY/UNUSED — kept only as an alternative reference. They are NOT the    │
-// │ runtime path and require an API key the project no longer uses.            │
+// ┌─ TWO ACTIVE RUNTIME PATHS (same pure core) ─────────────────────────────┐
+// │ 1. OUR / FAMILY: the Node backend in ../../server/index.mjs builds a       │
+// │    CodexProvider (Codex CLI subscription — GPT-5.5 vision, NO paid API /    │
+// │    NO API key) and calls the PURE handleAnalyzeMeal() below.               │
+// │ 2. MEMBER SELF-HOST: a member's Cloudflare Pages deploy runs onRequestPost │
+// │    below, which builds the member's OWN-KEY Gemini provider (via the       │
+// │    worker-safe ../_llm/select-own) and calls the SAME handleAnalyzeMeal().  │
+// │    This path is ACTIVE and worker-safe — it never imports the Node-only    │
+// │    Codex providers.                                                        │
 // └───────────────────────────────────────────────────────────────────────────┘
 //
 // Exports:
 //   - handleAnalyzeMeal(request, provider): pure, framework-free — the shared
-//     core used by the Node server AND unit tests (mock Request + MockProvider,
-//     no network, no real key). THIS is the live code path.
-//   - onRequestPost: DISABLED legacy Cloudflare Pages entry. Not active.
+//     core used by BOTH the Node server and the member CF deploy (and unit tests
+//     with a MockProvider, no network, no real key).
+//   - onRequestPost: ACTIVE Cloudflare Pages entry for a member self-host deploy
+//     (token-gated, own-key Gemini).
 
 import {
   groundDishes,
@@ -28,7 +30,12 @@ import {
   type SourceKind,
 } from "../_lib/ground";
 import type { MealVisionProvider } from "../_llm/provider";
-import { makeMealProvider, type ProviderEnv } from "../_llm/select";
+// A member's Cloudflare Pages (Workers) deploy is ALWAYS own-key, so the
+// onRequestPost path uses the WORKER-SAFE selector (./select-own) that imports
+// ONLY the fetch-native Gemini provider — never ../_llm/select, which references
+// the Node-only Codex providers (node:child_process / node:fs) and would break
+// the Workers bundle. The Node server keeps using ../_llm/select.
+import { makeOwnKeyMealProvider, type ProviderEnv } from "../_llm/select-own";
 
 /** ~9MB base64 ≈ ~6.7MB binary — generous cap for a client-downsized 1280px JPEG. */
 const MAX_IMAGE_BASE64_CHARS = 9_000_000;
@@ -247,7 +254,7 @@ export async function onRequestPost(context: PagesContext): Promise<Response> {
 
   let provider: MealVisionProvider;
   try {
-    provider = makeMealProvider(context.env);
+    provider = makeOwnKeyMealProvider(context.env);
   } catch {
     // Misconfigured AI_MODE/AI_PROVIDER → unavailable, never fabricates.
     return json(

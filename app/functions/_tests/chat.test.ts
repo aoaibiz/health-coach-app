@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   handleChat,
+  onRequestPost,
   shapeMessages,
   shapeContext,
   shapeMealAnalysis,
@@ -1142,5 +1143,63 @@ describe("shapeCoach — UNTRUSTED persona sanitisation (anti prompt-injection)"
     });
     expect(ctx?.coach?.name).toBeDefined();
     expect(ctx!.coach!.name).not.toContain("\n");
+  });
+});
+
+// ---- Active CF Pages Functions entry (member self-host deploy) -------------
+// onRequestPost is ACTIVE (a member's own Cloudflare Pages deploy). It is gated
+// by X-Health-App-Token vs the deploy's APP_ACCESS_TOKEN — mirroring the
+// analyze-meal gate tests. The gate short-circuits BEFORE any provider is built,
+// so these run with NO CLI / network / real key.
+describe("chat onRequestPost — CF Pages access gate (member self-host)", () => {
+  function postWithToken(body: unknown, token?: string): Request {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (token !== undefined) headers["x-health-app-token"] = token;
+    return new Request("https://example.test/api/chat", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+  }
+
+  const validBody = { messages: [{ role: "user", content: "やあ" }] };
+
+  it("fails closed with 503 when APP_ACCESS_TOKEN is unset", async () => {
+    const res = await onRequestPost({
+      request: postWithToken(validBody, "anything"),
+      env: {},
+    });
+    expect(res.status).toBe(503);
+    const data = (await res.json()) as { error?: string };
+    expect(data.error).toBe("chat_unavailable");
+  });
+
+  it("returns 401 when the token does not match APP_ACCESS_TOKEN", async () => {
+    const res = await onRequestPost({
+      request: postWithToken(validBody, "wrong"),
+      env: { APP_ACCESS_TOKEN: "right" },
+    });
+    expect(res.status).toBe(401);
+    const data = (await res.json()) as { error?: string };
+    expect(data.error).toBe("unauthorized");
+  });
+
+  it("returns 401 when no token header is sent", async () => {
+    const res = await onRequestPost({
+      request: postWithToken(validBody),
+      env: { APP_ACCESS_TOKEN: "right" },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 503 for AI_MODE=own with an unsupported provider (misconfig, never fabricates)", async () => {
+    const res = await onRequestPost({
+      request: postWithToken(validBody, "right"),
+      env: { APP_ACCESS_TOKEN: "right", AI_MODE: "own", AI_PROVIDER: "bogus" },
+    });
+    // makeOwnKeyChatProvider throws → mapped to chat_unavailable, never Codex.
+    expect(res.status).toBe(503);
+    const data = (await res.json()) as { error?: string };
+    expect(data.error).toBe("chat_unavailable");
   });
 });

@@ -16,8 +16,9 @@
 // supplies the authoritative numbers downstream. For "label"/"estimate" it ALSO
 // returns the kcal/PFC for that grams (transcribed label / general-knowledge
 // estimate). We REUSE the exact same prompt + the exact same robust JSON parser
-// as the Codex path (imported from ./codex), so the dish schema, the "last JSON
-// block wins" behaviour, and the no-fabrication coercion are byte-identical.
+// as the Codex path (imported from the Node-free ./meal-extract module, which
+// ./codex re-exports), so the dish schema, the "last JSON block wins" behaviour,
+// and the no-fabrication coercion are byte-identical.
 //
 // Chat: the prompt is built by the SAME chat-prompt.ts as the Codex path, so the
 // persona / guardrails / grounding context are identical. Only the transport
@@ -33,7 +34,12 @@
 // prompt instructs the model to ignore any embedded commands and output only the
 // requested JSON — same framing as the Codex meal prompt.
 
-import { MEAL_PROMPT, extractDishesFromCodexOutput } from "./codex";
+// Reuse the EXACT same meal prompt + robust JSON parser as the Codex path, but
+// import them from the Node-FREE module (./meal-extract) rather than ./codex —
+// importing from ./codex would pull node:child_process / node:fs into this file
+// and break a member's Cloudflare Pages (Workers) bundle. The prompt + parser are
+// byte-identical (./codex re-exports the same symbols), so the contract is unchanged.
+import { MEAL_PROMPT, extractDishesFromCodexOutput } from "./meal-extract";
 import type { AnalyzeInput, AnalyzeResult, MealVisionProvider } from "./provider";
 import type { ChatProvider } from "./chat";
 import { buildChatPrompt, type ChatContext, type ChatTurn } from "./chat-prompt";

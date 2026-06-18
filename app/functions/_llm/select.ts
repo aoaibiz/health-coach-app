@@ -25,20 +25,12 @@ import type { ChatProvider } from "./chat";
 import { CodexProvider } from "./codex";
 import { CodexChatProvider } from "./chat";
 import { GeminiProvider, GeminiChatProvider } from "./gemini";
-
-/** Env subset the selector reads. Both CF `context.env` and `process.env` fit. */
-export interface ProviderEnv {
-  /** "own" → use AI_PROVIDER's own-key provider; anything else → local Codex. */
-  AI_MODE?: string;
-  /** Own-key provider id (only "gemini" is wired now). */
-  AI_PROVIDER?: string;
-  GEMINI_API_KEY?: string;
-  MEAL_VISION_MODEL?: string;
-  CHAT_MODEL?: string;
-  // Other keys (CODEX_BIN, etc.) are read by the individual providers from
-  // process.env in the Node runtime; the selector doesn't need them.
-  [key: string]: string | undefined;
-}
+// The env shape is defined ONCE in the worker-safe ./select-own and re-exported
+// here so both runtimes share it. (This file additionally references the Node-only
+// Codex providers, so it must NOT be imported by the CF Pages onRequestPost path —
+// those handlers import the worker-safe ./select-own instead.)
+import type { ProviderEnv } from "./select-own";
+export type { ProviderEnv };
 
 /** Normalise the mode: "own" selects an own-key provider; everything else
  *  (unset, "local-codex", anything unknown) falls back to the Codex path. */

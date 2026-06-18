@@ -7,15 +7,26 @@
 //
 // Exports:
 //   - handleChat(request, provider): pure, framework-free — the shared core used
-//     by the Node server AND unit tests (mock Request + a MockChatProvider, no
-//     network, no real CLI). THIS is the live code path.
+//     by BOTH the Node server and the member CF deploy (and unit tests with a
+//     MockChatProvider, no network, no real CLI).
+//   - onRequestPost: ACTIVE Cloudflare Pages entry for a member self-host deploy
+//     (token-gated, own-key Gemini chat).
 //
-// Auth + concurrency are enforced by the Node route (server/index.mjs), exactly
-// like /api/analyze-meal: X-Health-App-Token gate, 503 when the env token is
-// unset, 401 on mismatch, shared concurrency cap.
+// Two active runtimes, same pure core:
+//   1. OUR / FAMILY — the Node route (server/index.mjs) builds a CodexChatProvider.
+//   2. MEMBER SELF-HOST — onRequestPost builds the member's own-key Gemini chat
+//      provider via the worker-safe ../_llm/select-own.
+// Auth + concurrency are enforced at each entry: X-Health-App-Token gate, 503 when
+// the env token is unset, 401 on mismatch (the Node route adds a shared concurrency
+// cap), exactly like /api/analyze-meal.
 
 import type { ChatProvider } from "../_llm/chat";
-import { makeChatProvider, type ProviderEnv } from "../_llm/select";
+// A member's Cloudflare Pages (Workers) deploy is ALWAYS own-key, so the
+// onRequestPost path uses the WORKER-SAFE selector (./select-own) that imports
+// ONLY the fetch-native Gemini chat provider — never ../_llm/select, which
+// references the Node-only Codex providers (node:child_process / node:fs) and
+// would break the Workers bundle. The Node server keeps using ../_llm/select.
+import { makeOwnKeyChatProvider, type ProviderEnv } from "../_llm/select-own";
 import {
   COACH_GENDERS,
   COACH_STYLES,
@@ -505,7 +516,7 @@ export async function onRequestPost(context: PagesContext): Promise<Response> {
 
   let provider: ChatProvider;
   try {
-    provider = makeChatProvider(context.env);
+    provider = makeOwnKeyChatProvider(context.env);
   } catch {
     return json(
       { error: "chat_unavailable", message: "チャットは準備中です。" },
