@@ -15,6 +15,7 @@
 // unset, 401 on mismatch, shared concurrency cap.
 
 import type { ChatProvider } from "../_llm/chat";
+import { makeChatProvider, type ProviderEnv } from "../_llm/select";
 import {
   COACH_GENDERS,
   COACH_STYLES,
@@ -456,6 +457,62 @@ export async function handleChat(
 
   const responseBody: ChatResponse = { reply: reply.trim() };
   return json(responseBody);
+}
+
+// ---- Cloudflare Pages Functions entry (member self-host deploy) -----------
+// The chat route a MEMBER's own Cloudflare Pages deploy runs. Selects the AI
+// provider from the deploy's env via select.ts (AI_MODE=own + AI_PROVIDER=gemini
+// → the member's own GEMINI_API_KEY; default → Codex), then calls the SAME pure
+// handleChat() the Node server uses. Access-gated IDENTICALLY to analyze-meal:
+// X-Health-App-Token must match the deploy's APP_ACCESS_TOKEN env (fail-closed
+// 503 when unset, 401 on mismatch). Honest errors, never fabricates a reply.
+
+interface PagesContext {
+  request: Request;
+  env: ChatEnv;
+}
+
+/** The env a member's Pages deploy provides (provider selection + access gate). */
+type ChatEnv = ProviderEnv & { APP_ACCESS_TOKEN?: string };
+
+/**
+ * Constant-time-ish token comparison without Node crypto (CF Workers runtime).
+ * Length check first (lengths are not secret), then a non-short-circuiting XOR
+ * accumulate so the decision time doesn't leak the prefix.
+ */
+function tokensMatch(provided: string | null, expected: string): boolean {
+  if (typeof provided !== "string") return false;
+  if (provided.length !== expected.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) {
+    diff |= provided.charCodeAt(i) ^ expected.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+/** ACTIVE CF Pages Functions handler — member self-host deploy chat entry. */
+export async function onRequestPost(context: PagesContext): Promise<Response> {
+  const expected = context.env.APP_ACCESS_TOKEN ?? "";
+  if (!expected) {
+    return json(
+      { error: "chat_unavailable", message: "チャットは準備中です。" },
+      503,
+    );
+  }
+  if (!tokensMatch(context.request.headers.get("x-health-app-token"), expected)) {
+    return errorResponse("unauthorized", 401);
+  }
+
+  let provider: ChatProvider;
+  try {
+    provider = makeChatProvider(context.env);
+  } catch {
+    return json(
+      { error: "chat_unavailable", message: "チャットは準備中です。" },
+      503,
+    );
+  }
+  return handleChat(context.request, provider);
 }
 
 export type { ChatContext, ChatTurn };

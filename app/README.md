@@ -38,13 +38,32 @@ this app DOES have a backend and account-based auth.
 - **Web Push** notifications (via the `api/` Worker).
 - **Light/dark theme**, persisted.
 
-## LLM provider
+## LLM provider — AI mode
 
-The DEFAULT meal-vision + chat path is the **subscription Codex CLI**
-(`functions/_llm/codex.ts`, `functions/_llm/chat.ts`) — it needs **no API key**.
-An optional **Anthropic Messages API** provider (`functions/_llm/anthropic.ts`)
-is kept as a LEGACY alternative and requires `ANTHROPIC_API_KEY`; it is inert
-unless you deliberately wire it up.
+`AI_MODE` (read once in `functions/_llm/select.ts`) picks which backend powers
+meal-photo analysis + the coach chat:
+
+- **`local-codex`** (default / unset) — the **subscription Codex CLI**
+  (`functions/_llm/codex.ts`, `functions/_llm/chat.ts`). Needs **no API key**.
+  This is the default for our/family instances; nothing about it changes.
+- **`own`** — bring **your own AI key** (for a member self-host deploy). Set
+  `AI_PROVIDER=gemini` and `GEMINI_API_KEY` to run on your own **Google Gemini**
+  key (`functions/_llm/gemini.ts`). Get a **FREE** key from
+  [Google AI Studio](https://aistudio.google.com/apikey). The meal/chat models
+  default to a free-tier Flash model (`gemini-2.0-flash`) and are overridable via
+  `MEAL_VISION_MODEL` / `CHAT_MODEL`. The same anti-fabrication grounding still
+  applies — the model only names dishes + estimates grams; the bundled DB
+  supplies the numbers.
+
+  > Note: Gemini's free tier has different terms than its paid tier — see
+  > Google's pricing/terms before relying on it.
+
+For a Cloudflare Pages self-host deploy, the `POST /api/analyze-meal` and
+`POST /api/chat` Pages Functions are gated by the `X-Health-App-Token` header vs
+the deploy's `APP_ACCESS_TOKEN` env (the same role `HEALTH_APP_TOKEN` plays for
+the Node server). The Anthropic Messages API provider
+(`functions/_llm/anthropic.ts`) remains as a LEGACY reference (requires
+`ANTHROPIC_API_KEY`) and is not wired into `select.ts` yet.
 
 ## Setup & run
 

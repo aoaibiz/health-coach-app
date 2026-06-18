@@ -28,6 +28,7 @@ import {
   type SourceKind,
 } from "../_lib/ground";
 import type { MealVisionProvider } from "../_llm/provider";
+import { makeMealProvider, type ProviderEnv } from "../_llm/select";
 
 /** ~9MB base64 ≈ ~6.7MB binary — generous cap for a client-downsized 1280px JPEG. */
 const MAX_IMAGE_BASE64_CHARS = 9_000_000;
@@ -191,25 +192,73 @@ export async function handleAnalyzeMeal(
   return json(responseBody);
 }
 
-// ---- DISABLED LEGACY: Cloudflare Pages Functions entry --------------------
-// The live runtime is the Node server + CodexProvider (see ../../server/index.mjs).
-// Keep this exported so accidental CF deployment fails closed instead of
-// reactivating the paid Anthropic API path.
+// ---- Cloudflare Pages Functions entry (member self-host deploy) -----------
+// This is the route a MEMBER's own Cloudflare Pages deploy runs. It selects the
+// AI provider from the deploy's env via select.ts (AI_MODE=own + AI_PROVIDER=
+// gemini → the member's own GEMINI_API_KEY; default → Codex), then calls the
+// SAME pure handleAnalyzeMeal() the Node server uses, so the validation +
+// grounding + anti-fabrication contract is identical.
+//
+// Access gate: mirror the Node server — the client must send X-Health-App-Token
+// matching the deploy's APP_ACCESS_TOKEN env. If unset, the route fails closed
+// (503) rather than running un-gated; on mismatch it returns 401. (Our/family
+// instances use the Node server's HEALTH_APP_TOKEN; a member's CF deploy sets
+// APP_ACCESS_TOKEN.)
 
 interface PagesContext {
   request: Request;
-  env: Record<string, unknown>;
+  env: AnalyzeMealEnv;
 }
 
-/** DISABLED CF Pages Functions handler — use the Node server + Codex path. */
-export async function onRequestPost(_context: PagesContext): Promise<Response> {
-  return json(
-    {
-      error: "disabled",
-      message: "写真解析はNodeサーバーのCodex経路を使用します。",
-    },
-    410,
-  );
+/** The env a member's Pages deploy provides (provider selection + access gate). */
+type AnalyzeMealEnv = ProviderEnv & { APP_ACCESS_TOKEN?: string };
+
+/**
+ * Constant-time-ish token comparison without Node crypto (CF Workers runtime).
+ * Length check first (lengths are not secret), then a non-short-circuiting XOR
+ * accumulate over the chars so the decision time doesn't leak the prefix.
+ */
+function tokensMatch(provided: string | null, expected: string): boolean {
+  if (typeof provided !== "string") return false;
+  if (provided.length !== expected.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) {
+    diff |= provided.charCodeAt(i) ^ expected.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+/** ACTIVE CF Pages Functions handler — member self-host deploy entry. */
+export async function onRequestPost(context: PagesContext): Promise<Response> {
+  const expected = context.env.APP_ACCESS_TOKEN ?? "";
+  if (!expected) {
+    // Fail closed: no token configured → analysis unavailable (manual entry OK).
+    return json(
+      {
+        error: "analysis_unavailable",
+        message: "写真解析は準備中です。",
+      },
+      503,
+    );
+  }
+  if (!tokensMatch(context.request.headers.get("x-health-app-token"), expected)) {
+    return errorResponse("unauthorized", 401);
+  }
+
+  let provider: MealVisionProvider;
+  try {
+    provider = makeMealProvider(context.env);
+  } catch {
+    // Misconfigured AI_MODE/AI_PROVIDER → unavailable, never fabricates.
+    return json(
+      {
+        error: "analysis_unavailable",
+        message: "写真解析は準備中です。",
+      },
+      503,
+    );
+  }
+  return handleAnalyzeMeal(context.request, provider);
 }
 
 /** Re-exported for callers that want to show the data source name. */

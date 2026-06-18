@@ -23,9 +23,8 @@ import { dirname, join, normalize, extname } from "node:path";
 import { timingSafeEqual } from "node:crypto";
 
 import { handleAnalyzeMeal } from "../dist/functions/api/analyze-meal.js";
-import { CodexProvider } from "../dist/functions/_llm/codex.js";
 import { handleChat } from "../dist/functions/api/chat.js";
-import { CodexChatProvider } from "../dist/functions/_llm/chat.js";
+import { makeMealProvider, makeChatProvider } from "../dist/functions/_llm/select.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = join(__dirname, "..", "out");
@@ -155,14 +154,20 @@ function codexErrorResponse(err) {
   };
 }
 
-/** Default provider factory — the ACTIVE path (real Codex CLI, no API key). */
+/**
+ * Default provider factories — route through select.ts so the AI backend is env-
+ * driven (AI_MODE/AI_PROVIDER). With AI_MODE unset / "local-codex" (the default),
+ * this returns the subscription Codex providers exactly as before, so OUR / FAMILY
+ * Node instances are UNCHANGED. A member self-host can set AI_MODE=own +
+ * AI_PROVIDER=gemini + GEMINI_API_KEY to run on their own key instead.
+ */
 function defaultMakeProvider() {
-  return new CodexProvider();
+  return makeMealProvider(process.env);
 }
 
-/** Default chat provider factory — the ACTIVE path (real Codex CLI, no API key). */
+/** Default chat provider factory — env-driven via select.ts (default Codex). */
 function defaultMakeChatProvider() {
-  return new CodexChatProvider();
+  return makeChatProvider(process.env);
 }
 
 /**
