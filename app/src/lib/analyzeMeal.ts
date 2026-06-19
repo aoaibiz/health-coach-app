@@ -12,7 +12,7 @@ import type {
   NutritionSourceKind,
 } from "./types";
 import { makeId } from "./date";
-import { itemsToNutrition, toMealItem } from "./mealItems";
+import { itemsToNutrition, setItemGrams, toMealItem } from "./mealItems";
 
 export const API_TOKEN_STORAGE_KEY = "health-app:apiToken";
 
@@ -211,6 +211,50 @@ export async function analyzeMeal(
     throw new Error("栄養値を取得できませんでした。あとで再試行できます。");
   }
   return nutrition;
+}
+
+/**
+ * Honest AI estimate for a SINGLE manually-added item the bundled MEXT DB could
+ * not match (e.g. a packaged drink / restaurant dish not in the table). Runs the
+ * SAME grounded text-analysis path as 「✨ AI解析」 over just this item's name, so
+ * the gap that used to show "栄養値を取得できませんでした" + 0 kcal is filled with a
+ * real, clearly-LABELLED 推定値 (never 公式DB) instead of a dead-end zero.
+ *
+ * ANTI-FABRICATION: the number comes only from the grounded analysis (the model's
+ * own labelled estimate, already sanity-bounded server-side); it is NEVER dressed
+ * up as a DB value. The result keeps the caller's id + grams (scaled
+ * proportionally from the estimate's anchor) so the row stays editable, and the
+ * source stays "推定値" (sourceKind "estimate", low confidence). If the analysis
+ * grounds the food to the DB after all (an alias the manual matcher missed), the
+ * DB-sourced item is returned as-is.
+ *
+ * Returns null when no estimate could be obtained (offline, no access key, the
+ * model declined, or it produced no usable number) — the caller then keeps the
+ * existing honest no-number 推定値 row. NEVER throws: a failed estimate must not
+ * break manual entry, which works without an access key.
+ */
+export async function estimateSingleItem(
+  id: string,
+  name: string,
+  grams: number,
+  options: AnalyzeMealOptions = {},
+): Promise<MealItem | null> {
+  const trimmed = name.trim();
+  if (!trimmed || !hasApiKey()) return null;
+  // Phrase it as a single-item meal so the analyzer returns one dish for it.
+  const text = grams > 0 ? `${trimmed} ${grams}g` : trimmed;
+  let nutrition: MealNutrition;
+  try {
+    nutrition = await analyzeMeal({ text }, options);
+  } catch {
+    return null; // offline / unauthed / declined — keep the honest no-number row.
+  }
+  const estimate = nutrition.items?.find((it) => it.kcal != null);
+  if (!estimate) return null;
+  // Re-key to the caller's id and re-scale to the grams they entered, keeping the
+  // estimate's source label/anchor intact (proportional recompute for estimates,
+  // exact DB recompute when the analysis grounded it to 公式DB).
+  return setItemGrams({ ...estimate, id, name: trimmed }, grams > 0 ? grams : estimate.grams);
 }
 
 /** Read a Blob as a base64 string (no data: prefix). Browser-only. */

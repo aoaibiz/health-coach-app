@@ -2,6 +2,7 @@ import { afterEach, describe, it, expect } from "vitest";
 import {
   API_TOKEN_STORAGE_KEY,
   analyzeMeal,
+  estimateSingleItem,
   hasApiKey,
   toMealNutrition,
   type AnalyzeMealApiResponse,
@@ -373,5 +374,82 @@ describe("analyzeMeal — offline / failure path (record is kept by caller)", ()
     }) as unknown as typeof fetch;
     await expect(analyzeMeal({}, { fetchImpl })).rejects.toThrow();
     expect(called).toBe(false);
+  });
+});
+
+describe("estimateSingleItem — DB-miss auto-estimate (honest 推定値, never 0/公式DB)", () => {
+  /** An ESTIMATE-only analyze-meal response for an unknown food. */
+  const estimateRes = (kcal = 290): AnalyzeMealApiResponse =>
+    apiResponse({
+      items: [
+        {
+          name: "コンビニのフライドチキン",
+          grams: 120,
+          kcal,
+          protein_g: 18,
+          fat_g: 18,
+          carb_g: 14,
+          source: "推定値",
+          sourceKind: "estimate",
+          sourceLabel: "推定値",
+          estimated: true,
+          confidence: "low",
+          matched: false,
+        },
+      ],
+      totals: { kcal, protein_g: 18, fat_g: 18, carb_g: 14 },
+      matchedCount: 0,
+      numberedCount: 1,
+      totalsIncludeEstimate: true,
+    });
+
+  it("fills an unknown food with a NON-ZERO 推定値 (estimate), keeping the caller's id+grams", async () => {
+    setWindowLocalStorage({ [API_TOKEN_STORAGE_KEY]: "secret-token" });
+    const fetchImpl = fetchReturning(
+      new Response(JSON.stringify(estimateRes(290)), { status: 200 }),
+    );
+    const item = await estimateSingleItem("row-1", "コンビニのフライドチキン", 60, { fetchImpl });
+    expect(item).not.toBeNull();
+    expect(item!.id).toBe("row-1"); // re-keyed to the caller's row
+    expect(item!.grams).toBe(60); // re-scaled to the grams the user entered
+    expect(item!.sourceKind).toBe("estimate"); // honest 推定値, NEVER 公式DB
+    expect(item!.source).toBe("推定値");
+    expect(item!.confidence).toBe("low");
+    // 290kcal/120g anchor → 60g ≈ 145kcal: a real number, not 0/null.
+    expect(item!.kcal).not.toBeNull();
+    expect(item!.kcal!).toBeGreaterThan(0);
+    expect(item!.kcal!).toBeCloseTo(145, 0);
+  });
+
+  it("returns null (NO throw) when there is no access key — manual entry must not break", async () => {
+    setWindowLocalStorage({}); // no key
+    let called = false;
+    const fetchImpl = (async () => {
+      called = true;
+      return new Response(JSON.stringify(estimateRes()), { status: 200 });
+    }) as unknown as typeof fetch;
+    const item = await estimateSingleItem("row-1", "謎の食べ物", 100, { fetchImpl });
+    expect(item).toBeNull();
+    expect(called).toBe(false); // short-circuits before the network call
+  });
+
+  it("returns null (NO throw) on an offline/failed analysis — keeps the honest no-number row", async () => {
+    setWindowLocalStorage({ [API_TOKEN_STORAGE_KEY]: "secret-token" });
+    const fetchImpl = (async () => {
+      throw new TypeError("Failed to fetch");
+    }) as unknown as typeof fetch;
+    const item = await estimateSingleItem("row-1", "謎の食べ物", 100, { fetchImpl });
+    expect(item).toBeNull();
+  });
+
+  it("if the analysis grounds the food to the DB after all, returns the 公式DB item", async () => {
+    setWindowLocalStorage({ [API_TOKEN_STORAGE_KEY]: "secret-token" });
+    const fetchImpl = fetchReturning(
+      new Response(JSON.stringify(apiResponse()), { status: 200 }), // db item
+    );
+    const item = await estimateSingleItem("row-1", "ごはん", 150, { fetchImpl });
+    expect(item).not.toBeNull();
+    expect(item!.sourceKind).toBe("db");
+    expect(item!.kcal!).toBeGreaterThan(0);
   });
 });

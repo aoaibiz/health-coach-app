@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { MealItem } from "@/lib/types";
 import {
   itemsToNutrition,
@@ -9,6 +9,7 @@ import {
   setItemQty,
 } from "@/lib/mealItems";
 import { groundManualItem } from "@/lib/foodGrounding";
+import { estimateSingleItem, hasApiKey } from "@/lib/analyzeMeal";
 import { makeId } from "@/lib/date";
 import { formatNumber } from "@/lib/workout";
 import { TrashIcon } from "../icons";
@@ -44,8 +45,26 @@ interface Props {
 export function MealItemsEditor({ items, onChange }: Props) {
   const [newName, setNewName] = useState("");
   const [newGrams, setNewGrams] = useState("");
+  // Ids of rows whose honest AI estimate is in flight (DB-miss auto-estimate).
+  // Drives a per-row "推定中…" indicator; never blocks the editor.
+  const [estimating, setEstimating] = useState<Set<string>>(new Set());
+
+  // Always patch the async estimate against the CURRENT item list (the user may
+  // have edited/removed rows while the estimate was in flight), so we read items
+  // through a ref rather than closing over a stale array.
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
 
   const totals = itemsToNutrition(items);
+
+  function markEstimating(id: string, on: boolean) {
+    setEstimating((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
 
   function update(id: string, next: MealItem) {
     onChange(items.map((it) => (it.id === id ? next : it)));
@@ -53,13 +72,45 @@ export function MealItemsEditor({ items, onChange }: Props) {
   function remove(id: string) {
     onChange(items.filter((it) => it.id !== id));
   }
+
+  /**
+   * For a manually-added row the DB could not match (an honest 推定値 row with no
+   * number), fetch a real labelled AI estimate in the BACKGROUND and patch the
+   * row's kcal/PFC in — turning the old 0 kcal / "取得できませんでした" dead-end into
+   * an honest, editable 推定値. Anti-fabrication is preserved: the estimate is
+   * produced by the shared grounded analysis path and stays labelled 推定値 (never
+   * 公式DB). Silent no-op when offline / no access key / the model declines.
+   */
+  async function autoEstimate(id: string, name: string, grams: number) {
+    if (!hasApiKey()) return;
+    markEstimating(id, true);
+    try {
+      const filled = await estimateSingleItem(id, name, grams);
+      if (!filled) return;
+      // Only apply if the row still exists and hasn't already been given a number
+      // (e.g. the user typed one in meanwhile). Patch against the live list.
+      const current = itemsRef.current;
+      const row = current.find((it) => it.id === id);
+      if (!row || row.kcal != null) return;
+      onChange(current.map((it) => (it.id === id ? filled : it)));
+    } finally {
+      markEstimating(id, false);
+    }
+  }
+
   function add() {
     const name = newName.trim();
     const grams = Number(newGrams);
     if (!name || !Number.isFinite(grams) || grams <= 0) return;
-    onChange([...items, groundManualItem(makeId(), name, grams)]);
+    const item = groundManualItem(makeId(), name, grams);
+    // Show the honest row immediately (never block the UI), then — if it's an
+    // unmatched estimate with no number — fill it via the background estimate.
+    onChange([...items, item]);
     setNewName("");
     setNewGrams("");
+    if (item.sourceKind === "estimate" && item.kcal == null) {
+      void autoEstimate(item.id, name, grams);
+    }
   }
 
   return (
@@ -78,6 +129,7 @@ export function MealItemsEditor({ items, onChange }: Props) {
           <ItemRow
             key={item.id}
             item={item}
+            estimating={estimating.has(item.id)}
             onChange={(next) => update(item.id, next)}
             onRemove={() => remove(item.id)}
           />
@@ -152,10 +204,13 @@ export function MealItemsEditor({ items, onChange }: Props) {
 
 function ItemRow({
   item,
+  estimating,
   onChange,
   onRemove,
 }: {
   item: MealItem;
+  /** True while a background AI estimate for this DB-miss row is in flight. */
+  estimating: boolean;
   onChange: (next: MealItem) => void;
   onRemove: () => void;
 }) {
@@ -230,11 +285,21 @@ function ItemRow({
           </div>
         </div>
 
-        {/* Per-item computed numbers */}
+        {/* Per-item computed numbers (or the in-flight estimate indicator). */}
         <div className="flex-1 text-right">
-          <span className="text-sm font-semibold tabular-nums text-slate-700 dark:text-navy-100">
-            {item.kcal != null ? `${formatNumber(item.kcal)} kcal` : "—"}
-          </span>
+          {item.kcal != null ? (
+            <span className="text-sm font-semibold tabular-nums text-slate-700 dark:text-navy-100">
+              {formatNumber(item.kcal)} kcal
+            </span>
+          ) : estimating ? (
+            <span className="text-[11px] font-medium text-amber-600 dark:text-amber-400">
+              推定中…
+            </span>
+          ) : (
+            <span className="text-sm font-semibold tabular-nums text-slate-700 dark:text-navy-100">
+              —
+            </span>
+          )}
         </div>
       </div>
 

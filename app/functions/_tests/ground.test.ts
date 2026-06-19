@@ -132,6 +132,61 @@ describe("everyday-food aliases ground to verified food_code rows (kcal>0)", () 
   });
 });
 
+describe("beverage aliases — drinks ground to 公式DB (coffee bug fix)", () => {
+  // Reference rows (verified in functions/_data/nutrition-lookup.json):
+  //   16045 コーヒー 浸出液 = 4kcal/100g   ← brewed black coffee
+  //   15088 ゼリー コーヒー = 43kcal/100g  ← coffee JELLY (the old WRONG match)
+  it("ブラックコーヒー / コーヒー → 16045 コーヒー 浸出液, a NON-ZERO 公式DB value", () => {
+    for (const name of ["ブラックコーヒー", "コーヒー", "ホットコーヒー", "アイスコーヒー"]) {
+      const item = groundDish({ name, grams: 200 });
+      expect(item.matched, `${name} should be a DB match`).toBe(true);
+      expect(item.sourceKind, `${name} is 公式DB, not estimate`).toBe("db");
+      expect(item.matchedCode, `${name} -> 16045 (brewed coffee), not 15088 (jelly)`).toBe(
+        "16045",
+      );
+      // 4kcal/100g × 200g = 8kcal — non-zero, was 0 / "取得できませんでした" before.
+      expect(item.kcal, `${name} kcal is real, not 0/null`).toBe(8);
+      expect(item.source).toBe(NUTRITION_SOURCE);
+    }
+  });
+
+  it("the bare コーヒー no longer mis-matches the coffee JELLY dessert (15088)", () => {
+    // Regression guard: before the alias, the single-token substring matcher
+    // grabbed 15088 ゼリー コーヒー (43kcal) for "コーヒー" — a confidently WRONG food.
+    const item = groundDish({ name: "コーヒー", grams: 100 });
+    expect(item.matchedCode).not.toBe("15088");
+    expect(item.matchedName).not.toContain("ゼリー");
+  });
+
+  it("common teas/soft drinks/alcohol ground to verified beverage rows (kcal≥0, 公式DB)", () => {
+    const cases: Array<[string, string]> = [
+      ["緑茶", "16037"],
+      ["お茶", "16037"],
+      ["麦茶", "16055"],
+      ["紅茶", "16044"],
+      ["ウーロン茶", "16042"],
+      ["コーラ", "16053"],
+      ["ビール", "16006"],
+      ["豆乳", "04052"],
+      ["カフェオレ", "13007"],
+      ["オレンジジュース", "07043"],
+      ["りんごジュース", "07150"],
+    ];
+    for (const [name, code] of cases) {
+      const item = groundDish({ name, grams: 100 });
+      expect(item.matched, `${name} should match`).toBe(true);
+      expect(item.sourceKind, `${name} is 公式DB`).toBe("db");
+      expect(item.matchedCode, `${name} -> ${code}`).toBe(code);
+      expect(item.kcal, `${name} kcal is a real DB number`).not.toBeNull();
+      expect(item.source).toBe(NUTRITION_SOURCE);
+    }
+  });
+
+  it("a genuinely-unknown drink still returns no DB match (never fabricated)", () => {
+    expect(findFood("謎のエナジードリンクXYZ123")).toBeNull();
+  });
+});
+
 describe("cooking-method names ground to the CORRECT prepared DB variant", () => {
   // Reference rows (verified in functions/_data/nutrition-lookup.json):
   //   02006 さつまいも 塊根 皮なし 生   = 126

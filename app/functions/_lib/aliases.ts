@@ -80,6 +80,38 @@ const ALIAS_DEFS: AliasDef[] = [
   { aliases: ["キウイ"], foodCode: "07054" },
   { aliases: ["ぶどう", "ブドウ"], foodCode: "07116" },
   { aliases: ["いちご", "イチゴ"], foodCode: "07012" },
+  // Beverages — the meal tracker had ZERO drink aliases, so common drinks
+  // (coffee/tea) either missed entirely (ブラックコーヒー → 0 kcal dead-end) or the
+  // bare single-token substring matcher landed on the WRONG row (コーヒー →
+  // 15088 ゼリー コーヒー, a dessert). Map the common spoken names to the verified
+  // beverage 浸出液/液状 rows so they ground to 公式DB directly. Every food_code
+  // below was confirmed against functions/_data/nutrition-lookup.json.
+  // ブラックコーヒー/コーヒー = 16045 コーヒー 浸出液 = 4kcal/100g (brewed black coffee).
+  { aliases: ["コーヒー", "ブラックコーヒー", "ホットコーヒー", "アイスコーヒー", "珈琲"], foodCode: "16045" },
+  { aliases: ["インスタントコーヒー"], foodCode: "16046" }, // 287kcal/100g (粉末)
+  { aliases: ["缶コーヒー", "微糖コーヒー"], foodCode: "16047", confidence: "medium" }, // コーヒー飲料 乳成分入り 加糖 = 38kcal
+  { aliases: ["カフェオレ", "カフェラテ", "コーヒー牛乳", "ミルクコーヒー"], foodCode: "13007", confidence: "medium" }, // 乳飲料 コーヒー = 56kcal
+  { aliases: ["緑茶", "煎茶", "せん茶", "お茶", "日本茶"], foodCode: "16037" }, // せん茶 浸出液 = 2kcal
+  { aliases: ["玉露"], foodCode: "16034" }, // 玉露 浸出液 = 5kcal
+  { aliases: ["ほうじ茶", "焙じ茶"], foodCode: "16040" }, // ほうじ茶 浸出液 = 0kcal
+  { aliases: ["番茶"], foodCode: "16039" }, // 番茶 浸出液 = 0kcal
+  { aliases: ["ウーロン茶", "烏龍茶"], foodCode: "16042" }, // ウーロン茶 浸出液 = 0kcal
+  { aliases: ["麦茶"], foodCode: "16055" }, // 麦茶 浸出液 = 1kcal
+  { aliases: ["紅茶"], foodCode: "16044" }, // 紅茶 浸出液 = 1kcal
+  { aliases: ["抹茶"], foodCode: "16035", confidence: "medium" }, // 抹茶 茶 = 237kcal (powder)
+  { aliases: ["コーラ"], foodCode: "16053" }, // コーラ = 46kcal
+  { aliases: ["サイダー", "ラムネ"], foodCode: "16054" }, // サイダー = 41kcal
+  { aliases: ["スポーツドリンク", "ポカリ", "アクエリアス"], foodCode: "16057", confidence: "medium" }, // スポーツドリンク = 21kcal
+  { aliases: ["ビール"], foodCode: "16006", confidence: "medium" }, // ビール 淡色 = 39kcal
+  { aliases: ["黒ビール"], foodCode: "16007" }, // ビール 黒 = 45kcal
+  { aliases: ["日本酒", "清酒", "お酒"], foodCode: "16001", confidence: "medium" }, // 清酒 普通酒 = 107kcal
+  { aliases: ["白ワイン"], foodCode: "16010" }, // ぶどう酒 白 = 75kcal
+  { aliases: ["赤ワイン"], foodCode: "16011" }, // ぶどう酒 赤 = 68kcal
+  { aliases: ["ワイン"], foodCode: "16010", confidence: "medium" }, // default to 白 (representative)
+  { aliases: ["豆乳", "無調整豆乳"], foodCode: "04052" }, // だいず 豆乳 豆乳 = 43kcal
+  { aliases: ["調製豆乳"], foodCode: "04053" }, // だいず 豆乳 調製豆乳 = 61kcal
+  { aliases: ["オレンジジュース"], foodCode: "07043", confidence: "medium" }, // オレンジ 濃縮還元ジュース = 46kcal
+  { aliases: ["りんごジュース", "アップルジュース"], foodCode: "07150", confidence: "medium" }, // りんご 濃縮還元ジュース = 47kcal
   { aliases: ["鮭", "さけ", "サケ", "焼き鮭", "焼鮭"], foodCode: "10136" },
   { aliases: ["塩鮭"], foodCode: "10139" },
   { aliases: ["さば", "サバ", "焼きさば", "焼きサバ"], foodCode: "10156" },
