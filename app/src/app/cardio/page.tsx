@@ -51,8 +51,11 @@ export default function CardioPage() {
   const distanceM = trackStats(points).distanceM;
   const speed = avgSpeedKmh(distanceM, elapsedSec);
   const activity = CARDIO_ACTIVITIES[selected];
-  const durationMin = Math.max(0, Math.round(elapsedSec / 60));
+  const durationMinExact = elapsedSec / 60;
   const weightKg = profile?.weightKg ?? 0;
+  // Savable once a REAL distance is recorded (≥10 m). Sitting still → ~0 m → the
+  // save is (correctly) unavailable; we tell the user why instead of a dead button.
+  const canSave = distanceM >= 10;
 
   // Calorie preview via the EXISTING burn model (MET × 体重 × 時間). burn.ts resolves
   // the MET from the activity name (ランニング/ウォーキング/サイクリング); we never invent it.
@@ -65,7 +68,7 @@ export default function CardioPage() {
             sets: 1,
             reps: 0,
             weight: 0,
-            durationMin: Math.max(1, durationMin),
+            durationMin: Math.max(0.1, durationMinExact),
             intensity: "moderate",
           },
           weightKg,
@@ -144,14 +147,16 @@ export default function CardioPage() {
   }
 
   function save() {
-    if (distanceM < 1 || durationMin < 1) return;
+    if (!canSave) return;
     const exercise: Exercise = {
       id: makeId(),
       name: `${activity.name} ${formatKm(distanceM)}`,
       sets: 1,
       reps: 0,
       weight: 0,
-      durationMin,
+      // Store the REAL elapsed minutes (1-dp) so short sessions log honestly and
+      // the calorie burn matches the time actually spent.
+      durationMin: Math.max(0.1, Math.round(durationMinExact * 10) / 10),
       intensity: "moderate",
     };
     addExercise(exercise);
@@ -246,23 +251,34 @@ export default function CardioPage() {
           </button>
         )}
         {phase === "done" && !saved && (
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={reset}
-              className="flex-1 rounded-xl bg-slate-100 py-3 text-base font-bold text-slate-600 transition active:scale-95 dark:bg-navy-800 dark:text-navy-200"
-            >
-              やり直す
-            </button>
-            <button
-              type="button"
-              onClick={save}
-              disabled={distanceM < 1 || durationMin < 1}
-              className="flex-1 rounded-xl bg-orange-500 py-3 text-base font-bold text-white transition active:scale-95 disabled:opacity-40"
-            >
-              運動ログに保存
-            </button>
-          </div>
+          <>
+            {!canSave && (
+              <div className="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-400/10 dark:text-amber-300">
+                まだ距離が記録されていません。少し歩く/走ると保存できます（GPSが動きを拾うまで数秒かかることがあります）。
+              </div>
+            )}
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={reset}
+                className="flex-1 rounded-xl bg-slate-100 py-3 text-base font-bold text-slate-600 transition active:scale-95 dark:bg-navy-800 dark:text-navy-200"
+              >
+                やり直す
+              </button>
+              <button
+                type="button"
+                onClick={save}
+                disabled={!canSave}
+                className={`flex-1 rounded-xl py-3 text-base font-bold transition active:scale-95 ${
+                  canSave
+                    ? "bg-orange-500 text-white"
+                    : "cursor-not-allowed bg-slate-200 text-slate-400 dark:bg-navy-800 dark:text-navy-500"
+                }`}
+              >
+                運動ログに保存
+              </button>
+            </div>
+          </>
         )}
         {saved && (
           <div className="text-center">
