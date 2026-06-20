@@ -11,6 +11,7 @@ import {
   ChatIcon,
   CloseIcon,
   DumbbellIcon,
+  FlameIcon,
   MealIcon,
   MoonIcon,
   SunIcon,
@@ -38,6 +39,12 @@ const SUB_PAGES = [
     label: "筋トレ",
     Icon: DumbbellIcon,
     match: (p: string) => p.startsWith("/workout"),
+  },
+  {
+    href: "/cardio",
+    label: "有酸素",
+    Icon: FlameIcon,
+    match: (p: string) => p.startsWith("/cardio"),
   },
   {
     href: "/calendar",
