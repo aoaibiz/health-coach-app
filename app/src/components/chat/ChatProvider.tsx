@@ -51,6 +51,7 @@ import {
   lastLoggedMealId,
   NON_FOOD_ANALYSIS,
 } from "@/lib/chatMealLog";
+import { estimateLoggedMeal } from "@/lib/chatMealEstimate";
 import { applyWorkoutLog, lastLoggedWorkoutIds } from "@/lib/chatWorkoutLog";
 import type { Profile } from "@/lib/types";
 
@@ -361,7 +362,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             analysis: mealAnalysis,
           });
           if (applied) {
-            saveMeals(applied.meals);
+            // Fill DB-miss (no-number 推定値) items with a real labelled AI estimate
+            // at log-time, so a chat-logged food the official DB can't match
+            // (カツオのタタキ / プロテイン) shows honest 推定値 numbers instead of 0 —
+            // mirroring the /meal editor's auto-estimate. Anti-fabrication preserved
+            // (numbers come from the shared analysis path; no key/offline → kept as-is).
+            const enriched = await estimateLoggedMeal(applied.meals, applied.mealId);
+            saveMeals(enriched);
             loggedMeal = { mealId: applied.mealId, itemCount: applied.itemCount };
           }
         }

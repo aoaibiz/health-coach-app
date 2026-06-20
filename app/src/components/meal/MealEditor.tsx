@@ -288,8 +288,10 @@ export function MealEditor({
         onClick={handleClose}
       />
 
-      {/* Sheet */}
-      <div className="relative w-full max-w-md rounded-t-3xl bg-white p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] shadow-2xl dark:bg-navy-900 animate-[slideup_0.22s_ease-out]">
+      {/* Sheet — capped to the viewport and internally scrollable so a tall meal
+          (many items / long text) can always be scrolled instead of overflowing
+          off-screen. dvh tracks the mobile browser chrome (address bar) correctly. */}
+      <div className="relative max-h-[90dvh] w-full max-w-md overflow-y-auto overscroll-contain rounded-t-3xl bg-white p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] shadow-2xl dark:bg-navy-900 animate-[slideup_0.22s_ease-out]">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-base font-bold">
             {existing ? "記録を編集" : "食事を記録"}
