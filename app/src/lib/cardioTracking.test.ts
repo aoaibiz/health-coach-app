@@ -97,6 +97,31 @@ describe("trackStats", () => {
     expect(trackStats(pts).distanceM).toBe(0);
   });
 
+  it("does NOT count drift while standing — even WITHOUT GPS speed (anchor radius)", () => {
+    // No speed field. The fix wiggles within ~7 m of accuracy 10 → never escapes the
+    // drift radius → distance stays 0. This is the real-device fix (devices that
+    // report no GPS speed must still not accumulate while sitting).
+    const wig = (latOff: number, tSec: number): GeoPoint => ({
+      lat: 35.0 + latOff,
+      lng: 139.0,
+      t: tSec * 1000,
+      accuracy: 10,
+    });
+    const pts = [wig(0, 0), wig(0.00005, 5), wig(-0.00004, 10), wig(0.00006, 15), wig(0, 20)];
+    expect(trackStats(pts).distanceM).toBe(0);
+  });
+
+  it("counts real movement that escapes the drift radius (no GPS speed)", () => {
+    const pt = (latOff: number, tSec: number): GeoPoint => ({
+      lat: 35.0 + latOff,
+      lng: 139.0,
+      t: tSec * 1000,
+      accuracy: 8,
+    });
+    const pts = [pt(0, 0), pt(0.001, 30)]; // ~111 m → escapes the 8 m radius
+    expect(trackStats(pts).distanceM).toBeGreaterThan(108);
+  });
+
   it("counts a segment when GPS speed says we're moving", () => {
     const sp = (lat: number, lng: number, tSec: number, speed: number): GeoPoint => ({
       lat,

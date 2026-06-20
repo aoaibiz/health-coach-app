@@ -73,26 +73,14 @@ export interface TrackStats {
 }
 
 /**
- * Decide whether a segment represents REAL movement (vs GPS drift while still).
- * Prefers the GPS instantaneous speed of the segment's end point — it stays ~0
- * when standing even as the fix wanders. Falls back to the segment's own
- * distance/implied-speed when the device doesn't report GPS speed.
- */
-function isMovingSegment(cur: GeoPoint, seg: number, dtSec: number, o: Required<TrackOptions>): boolean {
-  if (typeof cur.speed === "number" && cur.speed >= 0) {
-    return cur.speed * 3.6 >= o.minMovingKmh; // GPS speed = the reliable signal
-  }
-  // Fallback (no GPS speed): need a real-sized segment at a plausible pace.
-  if (seg < o.minSegmentM) return false;
-  const segSpeedKmh = dtSec > 0 ? (seg / dtSec) * 3.6 : Infinity;
-  return segSpeedKmh >= o.minMovingKmh && segSpeedKmh <= o.maxSpeedKmh;
-}
-
-/**
- * Accumulate distance over an ordered point list, counting a segment ONLY when
- * the device was actually moving (GPS-speed gate) and the hop is physically
- * plausible (not a teleport). This rejects the "distance grows while sitting"
- * drift. Points worse than maxAccuracyM are dropped first. Pure — no clock/DOM.
+ * Accumulate distance using an ANCHOR that only advances when the device truly
+ * moves OUT of its GPS drift radius. A point counts only when it is farther from
+ * the anchor than max(minSegmentM, the point's GPS accuracy) — wandering INSIDE
+ * that radius is drift and never accumulates. This is what stops "distance grows
+ * while sitting" even on phones that don't report GPS speed (the earlier bug).
+ * When GPS speed IS reported, a near-zero reading is an extra stop signal.
+ * Physically impossible hops (teleports) reset the anchor without counting.
+ * Points worse than maxAccuracyM are dropped first. Pure — no clock/DOM.
  */
 export function trackStats(points: GeoPoint[], opts: TrackOptions = {}): TrackStats {
   const o = { ...DEFAULT_TRACK_OPTS, ...opts };
@@ -101,15 +89,26 @@ export function trackStats(points: GeoPoint[], opts: TrackOptions = {}): TrackSt
     return { distanceM: 0, durationSec: 0, keptPoints: kept.length };
   }
   let distanceM = 0;
+  let anchor = kept[0];
   for (let i = 1; i < kept.length; i++) {
-    const a = kept[i - 1];
-    const b = kept[i];
-    const seg = haversineMeters(a, b);
-    const dtSec = Math.max(0, (b.t - a.t) / 1000);
-    const segSpeedKmh = dtSec > 0 ? (seg / dtSec) * 3.6 : Infinity;
-    if (segSpeedKmh > o.maxSpeedKmh) continue; // GPS jump — never count
-    if (!isMovingSegment(b, seg, dtSec, o)) continue; // standing still / drift
-    distanceM += seg;
+    const p = kept[i];
+    // GPS-speed stop signal (when the device reports it): near-zero speed = the
+    // user is standing still even if the fix wandered → ignore, keep the anchor.
+    if (typeof p.speed === "number" && p.speed >= 0 && p.speed * 3.6 < o.minMovingKmh) {
+      continue;
+    }
+    const d = haversineMeters(anchor, p);
+    const dtSec = Math.max(0, (p.t - anchor.t) / 1000);
+    // Drift radius: must move beyond the point's accuracy (and a floor) to count.
+    const threshold = Math.max(o.minSegmentM, p.accuracy ?? 0, anchor.accuracy ?? 0);
+    if (d < threshold) continue; // inside the drift radius → ignore, keep anchor
+    const spd = dtSec > 0 ? (d / dtSec) * 3.6 : Infinity;
+    if (spd > o.maxSpeedKmh) {
+      anchor = p; // teleport — re-anchor but don't count the impossible hop
+      continue;
+    }
+    distanceM += d;
+    anchor = p;
   }
   const durationSec = Math.max(0, (kept[kept.length - 1].t - kept[0].t) / 1000);
   return { distanceM, durationSec, keptPoints: kept.length };

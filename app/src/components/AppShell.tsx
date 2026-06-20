@@ -36,7 +36,7 @@ const SUB_PAGES = [
   },
   {
     href: "/workout",
-    label: "筋トレ",
+    label: "運動",
     Icon: DumbbellIcon,
     match: (p: string) => p.startsWith("/workout"),
   },

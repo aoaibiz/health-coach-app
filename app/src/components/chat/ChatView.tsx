@@ -76,7 +76,7 @@ function LoggedWorkoutChip() {
       className="mt-1.5 inline-flex items-center gap-1.5 rounded-full bg-sky-100 px-2.5 py-1 text-[11px] font-semibold text-sky-700 transition active:scale-95 hover:bg-sky-200 dark:bg-sky-400/15 dark:text-sky-300"
     >
       <DumbbellIcon className="h-3.5 w-3.5" />
-      筋トレを記録しました（タップで確認・編集）
+      運動を記録しました（タップで確認・編集）
     </Link>
   );
 }
@@ -206,7 +206,7 @@ function EmptyState({
         {coachName}に相談しよう
       </p>
       <p className="mt-1 max-w-[18rem] text-xs leading-relaxed text-slate-400 dark:text-navy-400">
-        今日の食事や筋トレ、次に何を食べるとよいかなど、気軽に聞いてみてください。
+        今日の食事や運動、次に何を食べるとよいかなど、気軽に聞いてみてください。
       </p>
     </div>
   );
