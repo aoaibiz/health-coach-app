@@ -12,7 +12,6 @@ import type { Exercise } from "@/lib/types";
 import {
   trackStats,
   avgSpeedKmh,
-  classifyActivity,
   paceMinPerKm,
   formatKm,
   CARDIO_ACTIVITIES,
@@ -30,35 +29,48 @@ export default function CardioPage() {
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [points, setPoints] = useState<GeoPoint[]>([]);
-  const [override, setOverride] = useState<CardioKind | null>(null);
+  // The activity is a STICKY user choice (default walk). It never auto-changes —
+  // the user picks 歩き/ラン/自転車 and it stays (fixes the "run flipped to walk").
+  const [selected, setSelected] = useState<CardioKind>("walk");
   const [error, setError] = useState<string>("");
-  const [, setTick] = useState<number>(0); // forces a re-render each second while tracking
+  const [, setTick] = useState<number>(0); // re-render each second while tracking
   const [saved, setSaved] = useState(false);
 
   const watchId = useRef<number | null>(null);
   const wakeLock = useRef<WakeLockSentinel | null>(null);
+  // Time is measured by the WALL CLOCK from the スタート press — never from GPS
+  // point timestamps (which can jump). startMs is set on start, endMs on stop.
+  const startMs = useRef<number>(0);
+  const [endMs, setEndMs] = useState<number | null>(null);
 
-  // --- live numbers (recomputed each render from the kept points) ---
-  const stats = trackStats(points);
-  const speed = avgSpeedKmh(stats.distanceM, stats.durationSec);
-  const auto = classifyActivity(speed);
-  const activity = override ? CARDIO_ACTIVITIES[override] : auto;
-  const durationMin = Math.max(0, Math.round(stats.durationSec / 60));
+  // --- live numbers ---
+  const elapsedSec =
+    phase === "idle" || startMs.current === 0
+      ? 0
+      : Math.max(0, ((endMs ?? Date.now()) - startMs.current) / 1000);
+  const distanceM = trackStats(points).distanceM;
+  const speed = avgSpeedKmh(distanceM, elapsedSec);
+  const activity = CARDIO_ACTIVITIES[selected];
+  const durationMin = Math.max(0, Math.round(elapsedSec / 60));
   const weightKg = profile?.weightKg ?? 0;
 
-  // Calorie preview via the EXISTING burn model (MET × 体重 × 時間). We never invent a
-  // number — burn.ts resolves the MET from the activity name (ランニング/ウォーキング/
-  // サイクリング) and the user's weight.
-  const previewExercise: Exercise = {
-    id: "preview",
-    name: activity.name,
-    sets: 1,
-    reps: 0,
-    weight: 0,
-    durationMin: Math.max(1, durationMin),
-    intensity: "moderate",
-  };
-  const kcal = weightKg > 0 ? exerciseBurn(previewExercise, weightKg).caloriesBurned : null;
+  // Calorie preview via the EXISTING burn model (MET × 体重 × 時間). burn.ts resolves
+  // the MET from the activity name (ランニング/ウォーキング/サイクリング); we never invent it.
+  const kcal =
+    weightKg > 0 && elapsedSec > 0
+      ? exerciseBurn(
+          {
+            id: "preview",
+            name: activity.name,
+            sets: 1,
+            reps: 0,
+            weight: 0,
+            durationMin: Math.max(1, durationMin),
+            intensity: "moderate",
+          },
+          weightKg,
+        ).caloriesBurned
+      : null;
 
   function releaseWake() {
     wakeLock.current?.release().catch(() => {});
@@ -91,11 +103,10 @@ export default function CardioPage() {
       return;
     }
     setPoints([]);
-    setOverride(null);
     setSaved(false);
+    setEndMs(null);
+    startMs.current = Date.now();
     setPhase("tracking");
-    // Keep the screen awake during tracking (best-effort). A PWA can't track in the
-    // background, so the screen must stay on / the app foregrounded.
     try {
       wakeLock.current = (await navigator.wakeLock?.request("screen")) ?? null;
     } catch {
@@ -110,6 +121,7 @@ export default function CardioPage() {
             lng: pos.coords.longitude,
             t: pos.timestamp,
             accuracy: pos.coords.accuracy,
+            speed: pos.coords.speed, // m/s, or null — the movement gate
           },
         ]);
       },
@@ -120,21 +132,22 @@ export default function CardioPage() {
             : "位置情報が取得できませんでした。空が見える場所で再試行してください。",
         );
       },
-      { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 },
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 },
     );
   }
 
   function stop() {
     stopWatch();
     releaseWake();
+    setEndMs(Date.now());
     setPhase("done");
   }
 
   function save() {
-    if (stats.distanceM < 1 || durationMin < 1) return;
+    if (distanceM < 1 || durationMin < 1) return;
     const exercise: Exercise = {
       id: makeId(),
-      name: `${activity.name} ${formatKm(stats.distanceM)}`,
+      name: `${activity.name} ${formatKm(distanceM)}`,
       sets: 1,
       reps: 0,
       weight: 0,
@@ -148,14 +161,14 @@ export default function CardioPage() {
   function reset() {
     setPhase("idle");
     setPoints([]);
-    setOverride(null);
     setError("");
     setSaved(false);
+    setEndMs(null);
+    startMs.current = 0;
   }
 
-  const elapsed = stats.durationSec;
-  const mm = String(Math.floor(elapsed / 60)).padStart(2, "0");
-  const ss = String(Math.floor(elapsed % 60)).padStart(2, "0");
+  const mm = String(Math.floor(elapsedSec / 60)).padStart(2, "0");
+  const ss = String(Math.floor(elapsedSec % 60)).padStart(2, "0");
 
   return (
     <AppShell>
@@ -164,7 +177,7 @@ export default function CardioPage() {
           <FlameIcon className="h-5 w-5 text-orange-500" /> 有酸素運動
         </h1>
         <p className="mb-4 text-xs text-slate-500 dark:text-navy-300">
-          スタートを押して歩く・走る・自転車。GPSで距離と時間を測ります。
+          種目を選んで『スタート』→歩く/走る/自転車→『ストップ』。GPSで距離と時間を測ります。
           <br />
           ※測定中は<strong>アプリを開いたまま・画面ON</strong>にしてください（ブラウザアプリなので、画面を消すと計測が止まります）。
         </p>
@@ -175,27 +188,21 @@ export default function CardioPage() {
           </div>
         )}
 
-        <div className="mb-4 grid grid-cols-2 gap-3">
-          <Stat label="距離" value={formatKm(stats.distanceM)} />
-          <Stat label="時間" value={`${mm}:${ss}`} />
-          <Stat label="ペース" value={paceMinPerKm(stats.distanceM, stats.durationSec) || "—"} />
-          <Stat label="消費カロリー(推定)" value={kcal != null ? `${kcal} kcal` : "体重未設定"} />
-        </div>
-
+        {/* Activity = sticky choice (does NOT auto-change) */}
         <div className="mb-4">
           <div className="mb-1.5 text-xs font-semibold text-slate-500 dark:text-navy-300">
-            種目（自動判定・タップで変更できます）
+            種目（選んだら固定。途中で変えたい時だけタップ）
           </div>
           <div className="grid grid-cols-3 gap-2">
             {(Object.keys(CARDIO_ACTIVITIES) as CardioKind[]).map((k) => {
               const a = CARDIO_ACTIVITIES[k];
-              const active = activity.kind === k;
+              const active = selected === k;
               return (
                 <button
                   key={k}
                   type="button"
-                  onClick={() => setOverride(k)}
-                  className={`rounded-xl px-3 py-2 text-sm font-semibold transition active:scale-95 ${
+                  onClick={() => setSelected(k)}
+                  className={`rounded-xl px-3 py-2.5 text-sm font-semibold transition active:scale-95 ${
                     active
                       ? "bg-orange-500 text-white"
                       : "bg-slate-100 text-slate-600 dark:bg-navy-800 dark:text-navy-200"
@@ -206,12 +213,19 @@ export default function CardioPage() {
               );
             })}
           </div>
-          {!override && phase !== "idle" && (
-            <div className="mt-1 text-[11px] text-slate-400">
-              速さから「{auto.label}」と判定しています。
-            </div>
-          )}
         </div>
+
+        <div className="mb-4 grid grid-cols-2 gap-3">
+          <Stat label="距離" value={formatKm(distanceM)} />
+          <Stat label="時間" value={`${mm}:${ss}`} />
+          <Stat label="ペース" value={paceMinPerKm(distanceM, elapsedSec) || "—"} />
+          <Stat label="消費カロリー(推定)" value={kcal != null ? `${kcal} kcal` : "体重未設定"} />
+        </div>
+        {phase === "tracking" && (
+          <div className="mb-4 -mt-2 text-[11px] text-slate-400">
+            今の速さ: 約 {speed.toFixed(1)} km/h（止まっている時は距離は増えません）
+          </div>
+        )}
 
         {phase === "idle" && (
           <button
@@ -243,7 +257,7 @@ export default function CardioPage() {
             <button
               type="button"
               onClick={save}
-              disabled={stats.distanceM < 1 || durationMin < 1}
+              disabled={distanceM < 1 || durationMin < 1}
               className="flex-1 rounded-xl bg-orange-500 py-3 text-base font-bold text-white transition active:scale-95 disabled:opacity-40"
             >
               運動ログに保存
@@ -253,7 +267,7 @@ export default function CardioPage() {
         {saved && (
           <div className="text-center">
             <div className="mb-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-3 text-sm font-semibold text-emerald-700 dark:border-emerald-400/30 dark:bg-emerald-400/10 dark:text-emerald-300">
-              ✓ 運動ログに保存しました（{activity.label} {formatKm(stats.distanceM)} / {kcal ?? "—"} kcal）
+              ✓ 運動ログに保存しました（{activity.label} {formatKm(distanceM)} / {kcal ?? "—"} kcal）
             </div>
             <div className="flex gap-2">
               <button

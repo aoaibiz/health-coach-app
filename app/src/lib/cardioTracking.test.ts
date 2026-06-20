@@ -79,6 +79,38 @@ describe("trackStats", () => {
   it("returns zeros for fewer than 2 good points", () => {
     expect(trackStats([p(35, 139, 0)]).distanceM).toBe(0);
   });
+
+  it("does NOT count drift while standing still (GPS speed ~0)", () => {
+    // The fix wanders ~10 m but the GPS speed says we're stopped → distance stays 0.
+    const sp = (lat: number, lng: number, tSec: number, speed: number): GeoPoint => ({
+      lat,
+      lng,
+      t: tSec * 1000,
+      accuracy: 8,
+      speed,
+    });
+    const pts = [
+      sp(35.0, 139.0, 0, 0),
+      sp(35.00009, 139.0, 5, 0.1), // ~10 m drift but speed≈0 (standing)
+      sp(35.0, 139.0, 10, 0.0),
+    ];
+    expect(trackStats(pts).distanceM).toBe(0);
+  });
+
+  it("counts a segment when GPS speed says we're moving", () => {
+    const sp = (lat: number, lng: number, tSec: number, speed: number): GeoPoint => ({
+      lat,
+      lng,
+      t: tSec * 1000,
+      accuracy: 8,
+      speed,
+    });
+    const pts = [
+      sp(35.0, 139.0, 0, 1.4),
+      sp(35.001, 139.0, 80, 1.4), // ~111 m, speed 1.4 m/s ≈ 5 km/h → moving
+    ];
+    expect(trackStats(pts).distanceM).toBeGreaterThan(108);
+  });
 });
 
 describe("avgSpeedKmh", () => {

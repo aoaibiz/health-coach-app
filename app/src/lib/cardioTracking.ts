@@ -20,6 +20,11 @@ export interface GeoPoint {
   t: number;
   /** GPS accuracy radius in metres (lower = better); optional. */
   accuracy?: number;
+  /** GPS instantaneous speed in m/s (Doppler-derived); null/undefined when the
+   *  device doesn't provide it. This is the RELIABLE "am I moving" signal — it
+   *  stays ~0 while standing still even as the fix drifts, so we use it to gate
+   *  distance accumulation and reject GPS drift. */
+  speed?: number | null;
 }
 
 const EARTH_R_M = 6_371_000;
@@ -42,30 +47,52 @@ export interface TrackOptions {
   maxAccuracyM?: number;
   /** Ignore a segment implying a speed above this (km/h) — a GPS jump. */
   maxSpeedKmh?: number;
-  /** Ignore a segment shorter than this (metres) — GPS jitter while still. */
+  /** Ignore a segment shorter than this (metres) — GPS jitter while still
+   *  (only used as the fallback when GPS speed is unavailable). */
   minSegmentM?: number;
+  /** Below this speed (km/h) a point is treated as standing still → its segment
+   *  is NOT counted. Beats GPS drift, which reads as near-zero GPS speed. */
+  minMovingKmh?: number;
 }
 
 const DEFAULT_TRACK_OPTS: Required<TrackOptions> = {
-  maxAccuracyM: 40,
+  maxAccuracyM: 25, // stricter: drift is worse on low-accuracy fixes
   maxSpeedKmh: 80, // faster than any walk/run/bike → a GPS glitch
-  minSegmentM: 3, // below this is standing-still jitter
+  minSegmentM: 4, // fallback jitter floor when GPS speed is unavailable
+  minMovingKmh: 1.8, // below this = standing still (drift), not real movement
 };
 
 export interface TrackStats {
-  /** Accumulated distance in metres (noise-filtered). */
+  /** Accumulated distance in metres (noise-filtered, only while moving). */
   distanceM: number;
-  /** Wall-clock seconds from first to last kept point. */
+  /** Wall-clock seconds from first to last kept point (point-based; the page
+   *  uses its own start-button wall clock for the live timer). */
   durationSec: number;
   /** Number of points that passed the accuracy filter. */
   keptPoints: number;
 }
 
 /**
- * Accumulate the noise-filtered distance + duration over an ordered point list.
- * Filters: points worse than maxAccuracyM are dropped; segments that are jitter
- * (< minSegmentM) or physically impossible (> maxSpeedKmh) are not added to the
- * distance (but time still advances). Pure — no clock, no DOM.
+ * Decide whether a segment represents REAL movement (vs GPS drift while still).
+ * Prefers the GPS instantaneous speed of the segment's end point — it stays ~0
+ * when standing even as the fix wanders. Falls back to the segment's own
+ * distance/implied-speed when the device doesn't report GPS speed.
+ */
+function isMovingSegment(cur: GeoPoint, seg: number, dtSec: number, o: Required<TrackOptions>): boolean {
+  if (typeof cur.speed === "number" && cur.speed >= 0) {
+    return cur.speed * 3.6 >= o.minMovingKmh; // GPS speed = the reliable signal
+  }
+  // Fallback (no GPS speed): need a real-sized segment at a plausible pace.
+  if (seg < o.minSegmentM) return false;
+  const segSpeedKmh = dtSec > 0 ? (seg / dtSec) * 3.6 : Infinity;
+  return segSpeedKmh >= o.minMovingKmh && segSpeedKmh <= o.maxSpeedKmh;
+}
+
+/**
+ * Accumulate distance over an ordered point list, counting a segment ONLY when
+ * the device was actually moving (GPS-speed gate) and the hop is physically
+ * plausible (not a teleport). This rejects the "distance grows while sitting"
+ * drift. Points worse than maxAccuracyM are dropped first. Pure — no clock/DOM.
  */
 export function trackStats(points: GeoPoint[], opts: TrackOptions = {}): TrackStats {
   const o = { ...DEFAULT_TRACK_OPTS, ...opts };
@@ -79,9 +106,9 @@ export function trackStats(points: GeoPoint[], opts: TrackOptions = {}): TrackSt
     const b = kept[i];
     const seg = haversineMeters(a, b);
     const dtSec = Math.max(0, (b.t - a.t) / 1000);
-    if (seg < o.minSegmentM) continue; // standing-still jitter
     const segSpeedKmh = dtSec > 0 ? (seg / dtSec) * 3.6 : Infinity;
-    if (segSpeedKmh > o.maxSpeedKmh) continue; // GPS jump — skip the segment
+    if (segSpeedKmh > o.maxSpeedKmh) continue; // GPS jump — never count
+    if (!isMovingSegment(b, seg, dtSec, o)) continue; // standing still / drift
     distanceM += seg;
   }
   const durationSec = Math.max(0, (kept[kept.length - 1].t - kept[0].t) / 1000);
