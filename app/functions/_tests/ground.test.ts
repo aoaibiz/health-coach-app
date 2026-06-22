@@ -370,8 +370,28 @@ describe("groundDish — known dish grounds to DB numbers × grams/100", () => {
     expect(item.confidence).toBe("high");
     expect(item.matchedCode).toBe("01088");
     // The per-100g basis is exposed so the client can recompute on a portion
-    // edit EXACTLY from the official DB (never from a scaled model number).
-    expect(item.basisPer100g).toEqual({ kcal: 156, protein_g: 2.5, fat_g: 0.3, carb_g: 37.1 });
+    // edit EXACTLY from the official DB (never from a scaled model number). The
+    // extra nutrients (fiber/sugar/sodium) come from the DB row too; saturated
+    // fat is not in the bundled table → always null for a 公式DB item. The
+    // vitamins/minerals (拡張①) ride along in a nested `micros` map.
+    expect(item.basisPer100g).toMatchObject({
+      kcal: 156,
+      protein_g: 2.5,
+      fat_g: 0.3,
+      carb_g: 37.1,
+      fiber_g: 1.5,
+      sugar_g: 38.1,
+      sodium_mg: 1,
+      saturated_fat_g: null,
+    });
+    // The grounded item carries the portion-scaled extra nutrients (×1.5 for 150g).
+    expect(item.fiber_g).toBeCloseTo(2.3, 1); // 1.5 * 1.5 = 2.25 → 2.3 (round1)
+    expect(item.sodium_mg).toBeCloseTo(1.5, 1); // 1 * 1.5
+    expect(item.saturated_fat_g).toBeNull(); // not in the bundled table
+    // 拡張① — vitamins/minerals are present on the basis (per 100g) and scaled on
+    // the item (×1.5). ごはん 01088 has potassium 29mg/100g per the MEXT table.
+    expect(item.basisPer100g?.micros?.potassium).toBe(29);
+    expect(item.micros?.potassium).toBeCloseTo(43.5, 1); // 29 * 1.5
   });
 
   it("scales linearly with grams (100g → exactly per-100g values)", () => {
@@ -440,6 +460,99 @@ describe("groundDishes — totals sum only matched items", () => {
     const result = groundDishes([]);
     expect(result.totals.kcal).toBe(0);
     expect(result.matchedCount).toBe(0);
+  });
+});
+
+describe("extra nutrients (全栄養素) — fiber / sugar / sodium / saturated", () => {
+  it("a db food carries DB-sourced fiber/sugar/sodium (scaled), saturated always null", () => {
+    const item = groundDish({ name: "ごはん", grams: 100, source: "db" });
+    expect(item.sourceKind).toBe("db");
+    // cooked white rice (01088) per 100g: fiber 1.5, sugar 38.1, sodium 1.
+    expect(item.fiber_g).toBeCloseTo(1.5, 1);
+    expect(item.sugar_g).toBeCloseTo(38.1, 1);
+    expect(item.sodium_mg).toBeCloseTo(1, 1);
+    // Saturated fat is not in the bundled table → null for a 公式DB item (honest).
+    expect(item.saturated_fat_g).toBeNull();
+  });
+
+  it("a label/estimate item carries the model's extra nutrients when supplied", () => {
+    const item = groundDish({
+      name: "プロテインバー",
+      grams: 50,
+      source: "label",
+      kcal: 200,
+      protein_g: 20,
+      fat_g: 6,
+      carb_g: 20,
+      fiber_g: 5,
+      sugar_g: 8,
+      sodium_mg: 150,
+      saturated_fat_g: 3,
+    });
+    expect(item.fiber_g).toBe(5);
+    expect(item.sugar_g).toBe(8);
+    expect(item.sodium_mg).toBe(150);
+    expect(item.saturated_fat_g).toBe(3);
+  });
+
+  it("a label/estimate item with NO extra nutrients keeps them null (no fabricated 0)", () => {
+    const item = groundDish({
+      name: "謎の総菜",
+      grams: 100,
+      source: "estimate",
+      kcal: 250,
+      protein_g: 10,
+      fat_g: 12,
+      carb_g: 22,
+    });
+    expect(item.kcal).toBe(250); // kcal/PFC present
+    expect(item.fiber_g).toBeNull(); // extras unknown → null, NOT 0
+    expect(item.sugar_g).toBeNull();
+    expect(item.sodium_mg).toBeNull();
+    expect(item.saturated_fat_g).toBeNull();
+  });
+
+  it("totals sum extras only over items that carry them; null when none do", () => {
+    const result = groundDishes([
+      { name: "ごはん", grams: 100, source: "db" }, // fiber 1.5, no saturated
+      {
+        name: "プロテインバー",
+        grams: 50,
+        source: "label",
+        kcal: 200,
+        protein_g: 20,
+        fat_g: 6,
+        carb_g: 20,
+        fiber_g: 5,
+        saturated_fat_g: 3,
+      },
+    ]);
+    // fiber present on both → summed.
+    expect(result.totals.fiber_g).toBeCloseTo(6.5, 1); // 1.5 + 5
+    // saturated only on the label item → its value (rice contributes null).
+    expect(result.totals.saturated_fat_g).toBe(3);
+  });
+
+  it("totals.fiber is null when NO numbered item has a fiber figure", () => {
+    const result = groundDishes([
+      { name: "謎A", grams: 100, source: "estimate", kcal: 100 },
+      { name: "謎B", grams: 100, source: "estimate", kcal: 100 },
+    ]);
+    expect(result.totals.kcal).toBe(200);
+    expect(result.totals.fiber_g).toBeNull(); // honest: no fiber data at all
+  });
+
+  it("drops an absurd extra nutrient to null without voiding the whole estimate", () => {
+    const item = groundDish({
+      name: "誇張バー",
+      grams: 50,
+      source: "estimate",
+      kcal: 200,
+      protein_g: 10,
+      fiber_g: 9999, // impossible (> portion grams) → dropped to null
+    });
+    expect(item.kcal).toBe(200); // estimate survives
+    expect(item.fiber_g).toBeNull(); // the absurd extra is dropped, not the item
   });
 });
 
@@ -574,6 +687,67 @@ describe("ANTI-ABSURD-VALUE GUARD — reject negative/impossible model numbers",
     expect(item.kcal).toBeNull();
     expect(item.sourceKind).toBeNull();
     expect(item.estimated).toBe(false);
+  });
+});
+
+describe("ANTI-FABRICATION — an unmeasured PFC stays null (NOT a fabricated 0)", () => {
+  it("a kcal-only estimate keeps PFC null (no 0g protein/fat/carb invented)", () => {
+    // The model gave only a kcal figure (it couldn't read the macros). Each
+    // missing macro must stay null — the UI then shows "—", not a fake 0g.
+    const item = groundDish({ name: "屋台のたい焼き", grams: 100, source: "estimate", kcal: 210 });
+    expect(item.kcal).toBe(210);
+    expect(item.sourceKind).toBe("estimate");
+    expect(item.protein_g).toBeNull();
+    expect(item.fat_g).toBeNull();
+    expect(item.carb_g).toBeNull();
+  });
+
+  it("a label item with only kcal + protein keeps the missing fat/carb null", () => {
+    const item = groundDish({
+      name: "プロテインバー",
+      grams: 40,
+      source: "label",
+      kcal: 150,
+      protein_g: 15,
+      // fat_g / carb_g omitted — must NOT become 0.
+    });
+    expect(item.protein_g).toBe(15);
+    expect(item.fat_g).toBeNull();
+    expect(item.carb_g).toBeNull();
+  });
+
+  it("groundDishes totals sum PFC only over items that have them (no 0 from kcal-only)", () => {
+    // One estimate carries kcal + protein; another carries kcal only. The protein
+    // total must be JUST the first item's protein (the kcal-only item must not add
+    // a fabricated 0), and fat/carb must be null (no numbered item carried them).
+    const result = groundDishes([
+      { name: "焼き菓子A", grams: 100, source: "estimate", kcal: 200, protein_g: 5 },
+      { name: "焼き菓子B", grams: 100, source: "estimate", kcal: 150 }, // kcal only
+    ]);
+    expect(result.numberedCount).toBe(2);
+    expect(result.totals.kcal).toBe(350);
+    expect(result.totals.protein_g).toBe(5); // only item A's protein, NOT 5+0
+    expect(result.totals.fat_g).toBeNull(); // no item carried fat → "—", not 0
+    expect(result.totals.carb_g).toBeNull();
+  });
+
+  it("a meal of ONLY kcal-only estimates reports PFC totals as null (not 0)", () => {
+    const result = groundDishes([
+      { name: "謎A", grams: 100, source: "estimate", kcal: 120 },
+      { name: "謎B", grams: 100, source: "estimate", kcal: 80 },
+    ]);
+    expect(result.totals.kcal).toBe(200);
+    expect(result.totals.protein_g).toBeNull();
+    expect(result.totals.fat_g).toBeNull();
+    expect(result.totals.carb_g).toBeNull();
+  });
+
+  it("a db food still carries real PFC totals (the null rule never hides DB numbers)", () => {
+    const result = groundDishes([{ name: "ごはん", grams: 100, source: "db" }]);
+    expect(result.totals.kcal).toBe(156);
+    expect(result.totals.protein_g).toBeCloseTo(2.5, 1);
+    expect(result.totals.fat_g).toBeCloseTo(0.3, 1);
+    expect(result.totals.carb_g).toBeCloseTo(37.1, 1);
   });
 });
 

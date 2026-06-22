@@ -21,6 +21,7 @@ import type {
   MealNutrition,
   NutritionSourceKind,
 } from "./types";
+import { scaleMicros, sumMicros, type Micros } from "../../functions/_lib/micros";
 
 /** One decimal place, matching the server-side grounding rounding. */
 function round1(n: number): number {
@@ -60,12 +61,24 @@ export function recomputeItem(item: MealItem): MealItem {
   if (item.sourceKind === "db" && item.basisPer100g) {
     const b = item.basisPer100g;
     const f = grams / 100;
+    // Extra nutrients are NULLABLE on the basis (the DB row may not measure them,
+    // saturated fat is never in the bundled table): scale only when present, else
+    // carry null (recompute → null → "—" in the UI, never a fabricated 0).
+    const scaleOrNull = (v: number | null | undefined): number | null =>
+      v == null ? null : round1(v * f);
     return {
       ...item,
       kcal: round1(b.kcal * f),
       proteinG: round1(b.proteinG * f),
       fatG: round1(b.fatG * f),
       carbG: round1(b.carbG * f),
+      fiberG: scaleOrNull(b.fiberG),
+      sugarG: scaleOrNull(b.sugarG),
+      sodiumMg: scaleOrNull(b.sodiumMg),
+      saturatedFatG: scaleOrNull(b.saturatedFatG),
+      // Vitamins/minerals (拡張①): scaled from the per-100g basis micros (null per
+      // unmeasured key → "—"); undefined when the basis carries none.
+      micros: scaleMicros(b.micros, f),
     };
   }
 
@@ -84,6 +97,12 @@ export function recomputeItem(item: MealItem): MealItem {
     proteinG: scaleOrNull(item.baseProteinG),
     fatG: scaleOrNull(item.baseFatG),
     carbG: scaleOrNull(item.baseCarbG),
+    fiberG: scaleOrNull(item.baseFiberG),
+    sugarG: scaleOrNull(item.baseSugarG),
+    sodiumMg: scaleOrNull(item.baseSodiumMg),
+    saturatedFatG: scaleOrNull(item.baseSaturatedFatG),
+    // Vitamins/minerals (拡張①): proportional scale from the model's anchor micros.
+    micros: scaleMicros(item.baseMicros, scale),
   };
 }
 
@@ -112,6 +131,13 @@ export function toMealItem(input: {
   proteinG: number | null;
   fatG: number | null;
   carbG: number | null;
+  /** Extra nutrients (optional/nullable) for `grams` at qty=1; null when unknown. */
+  fiberG?: number | null;
+  sugarG?: number | null;
+  sodiumMg?: number | null;
+  saturatedFatG?: number | null;
+  /** Vitamins/minerals (拡張①) for `grams` at qty=1; nullable per key, absent → undefined. */
+  micros?: Micros;
   sourceKind: NutritionSourceKind;
   source?: string;
   confidence?: MealItem["confidence"];
@@ -128,6 +154,11 @@ export function toMealItem(input: {
     proteinG: input.proteinG,
     fatG: input.fatG,
     carbG: input.carbG,
+    fiberG: input.fiberG ?? null,
+    sugarG: input.sugarG ?? null,
+    sodiumMg: input.sodiumMg ?? null,
+    saturatedFatG: input.saturatedFatG ?? null,
+    ...(input.micros ? { micros: input.micros } : {}),
     sourceKind: input.sourceKind,
     source: input.source,
     confidence: input.confidence,
@@ -141,6 +172,12 @@ export function toMealItem(input: {
     base.baseProteinG = input.proteinG;
     base.baseFatG = input.fatG;
     base.baseCarbG = input.carbG;
+    base.baseFiberG = input.fiberG ?? null;
+    base.baseSugarG = input.sugarG ?? null;
+    base.baseSodiumMg = input.sodiumMg ?? null;
+    base.baseSaturatedFatG = input.saturatedFatG ?? null;
+    // Anchor the model's micros (拡張①) for proportional recompute on edit.
+    if (input.micros) base.baseMicros = input.micros;
   }
   // Recompute once so the stored numbers match grams×qty exactly.
   return recomputeItem(base);
@@ -175,28 +212,46 @@ function dominantSourceKind(items: MealItem[]): NutritionSourceKind {
  * Carries the editable `items` so a saved meal keeps its breakdown. Preserves
  * the existing `source`/`generatedBy` strings (passed via `meta`) for the badge.
  */
+/**
+ * Sum a nullable EXTRA nutrient across the numbered items: null when NO item
+ * carries it (so a meal of foods with no fiber figure shows fiber "—", not a fake
+ * 0), else the sum over the items that DO. Mirrors the server's sumNullable in
+ * functions/_lib/ground.ts. round1 for display parity.
+ */
+function sumExtra(items: MealItem[], pick: (i: MealItem) => number | null | undefined): number | null {
+  const present = items
+    .map(pick)
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  if (present.length === 0) return null;
+  return round1(present.reduce((a, b) => a + b, 0));
+}
+
 export function itemsToNutrition(
   items: MealItem[],
   meta?: { source?: string; generatedBy?: string },
 ): MealNutrition {
   const numbered = items.filter((i) => i.kcal != null);
-  const sum = numbered.reduce(
-    (acc, i) => ({
-      calories: acc.calories + (i.kcal ?? 0),
-      proteinG: acc.proteinG + (i.proteinG ?? 0),
-      fatG: acc.fatG + (i.fatG ?? 0),
-      carbG: acc.carbG + (i.carbG ?? 0),
-    }),
-    { calories: 0, proteinG: 0, fatG: 0, carbG: 0 },
-  );
+  // kcal is summed over every numbered item (all have it by definition). PFC are
+  // summed ONLY over items that actually carry each macro (sumExtra), so a
+  // kcal-only estimate item adds its kcal but never a fabricated 0 protein, and a
+  // meal with no macro figures at all reports protein/fat/carb as null ("—").
+  const calories = round1(numbered.reduce((acc, i) => acc + (i.kcal ?? 0), 0));
   // Prefer a 公式DB source string for the badge; else the first sourced item.
   const dbSource = numbered.find((i) => i.sourceKind === "db" && i.source)?.source;
   const anySource = numbered.find((i) => i.source)?.source;
   return {
-    calories: round1(sum.calories),
-    proteinG: round1(sum.proteinG),
-    fatG: round1(sum.fatG),
-    carbG: round1(sum.carbG),
+    calories,
+    proteinG: sumExtra(numbered, (i) => i.proteinG),
+    fatG: sumExtra(numbered, (i) => i.fatG),
+    carbG: sumExtra(numbered, (i) => i.carbG),
+    // Extra nutrients summed only over items that carry them; null when none do.
+    fiberG: sumExtra(numbered, (i) => i.fiberG),
+    sugarG: sumExtra(numbered, (i) => i.sugarG),
+    sodiumMg: sumExtra(numbered, (i) => i.sodiumMg),
+    saturatedFatG: sumExtra(numbered, (i) => i.saturatedFatG),
+    // Vitamin/mineral totals (拡張①): summed over numbered items that carry each
+    // micro; null per key when none, undefined when no item carried any.
+    micros: sumMicros(numbered.map((i) => i.micros)),
     source: meta?.source ?? dbSource ?? anySource ?? undefined,
     confidence: summarizeItemConfidence(items),
     generatedBy: meta?.generatedBy,

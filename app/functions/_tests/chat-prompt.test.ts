@@ -3,8 +3,10 @@ import {
   buildChatPrompt,
   buildPersona,
   formatChatContext,
+  formatIntakeMicros,
   formatLoggedMealItems,
   formatLoggedWorkoutItems,
+  formatRecentDays,
   formatRegisteredProfile,
   formatTranscript,
   AUTO_LOG_PROTOCOL,
@@ -57,6 +59,22 @@ function expectSafetyFloorIntact(prompt: string) {
   expect(prompt).toContain(MEAL_PROTOCOL_MARKER);
   expect(prompt).toContain(WORKOUT_PROTOCOL_MARKER);
 }
+
+describe("auto-log protocols COUPLE the prose claim to the block (Task 1 — recording reliability)", () => {
+  it("the meal protocol forbids claiming a completed save without the block", () => {
+    expect(AUTO_LOG_PROTOCOL).toContain("記録の整合性");
+    expect(AUTO_LOG_PROTOCOL).toContain("必ずブロックを付けること");
+  });
+  it("the workout protocol forbids claiming a completed save without the block", () => {
+    expect(WORKOUT_LOG_PROTOCOL).toContain("記録の整合性");
+    expect(WORKOUT_LOG_PROTOCOL).toContain("必ずブロックを付けること");
+  });
+  it("both coupling rules survive into the full built prompt", () => {
+    const prompt = buildChatPrompt(TURNS);
+    expect(prompt).toContain("記録の整合性");
+    expect(prompt).toContain("必ずブロックを付けること");
+  });
+});
 
 describe("buildChatPrompt — default persona (no coach settings)", () => {
   it("defaults to 健康マン when no coach is set", () => {
@@ -290,5 +308,102 @@ describe("persona inputs are treated as data, not instructions (defense-in-depth
     // inside the name segment, never on its own line.
     expect(label.split("\n")).toHaveLength(1);
     expect(label.startsWith(`${sneaky}: `)).toBe(true);
+  });
+});
+
+describe("sleep + recent-days context (Features ① + ②)", () => {
+  it("renders today's sleep line when provided", () => {
+    const block = formatChatContext({ sleepToday: "23:00→07:00（8時間0分）" } as ChatContext);
+    expect(block).toContain("・今日の睡眠: 23:00→07:00（8時間0分）");
+  });
+
+  it("formatRecentDays renders per-day digest lines; null when empty", () => {
+    const out = formatRecentDays([
+      { label: "6月20日(金)", intakeKcal: 1800, mealCount: 3, burnKcal: 250, exerciseCount: 2, sleep: "7時間0分" },
+      { label: "6月19日(木)", intakeKcal: 2000, mealCount: 2 },
+      { label: "空の日" }, // no metrics → dropped
+    ]);
+    expect(out).not.toBeNull();
+    expect(out).toContain("6月20日(金): 摂取1800kcal(3食) / 運動250kcal(2種目) / 睡眠 7時間0分");
+    expect(out).toContain("6月19日(木): 摂取2000kcal(2食)");
+    expect(out).not.toContain("空の日"); // label-only day omitted
+    expect(formatRecentDays([])).toBeNull();
+    expect(formatRecentDays(undefined)).toBeNull();
+  });
+
+  it("the recent-days digest appears in the context block", () => {
+    const block = formatChatContext({
+      recentDays: [{ label: "6月20日(金)", intakeKcal: 1800, mealCount: 3 }],
+    } as ChatContext);
+    expect(block).toContain("・最近の記録（直近の数日・参考）:");
+    expect(block).toContain("6月20日(金): 摂取1800kcal(3食)");
+  });
+
+  it("the time-awareness guide tells the coach it CAN log a past day on request", () => {
+    const prompt = buildChatPrompt(TURNS);
+    expect(prompt).toContain("過去の日付を指定して記録");
+    // And the safety floor is unchanged.
+    expectSafetyFloorIntact(prompt);
+  });
+});
+
+describe("拡張① — today's vitamins/minerals reach the coach context (Major 3)", () => {
+  it("formatIntakeMicros joins the pre-formatted lines; null when empty", () => {
+    expect(formatIntakeMicros(["ビタミンC 80mg", "鉄 6.5mg"])).toBe("ビタミンC 80mg / 鉄 6.5mg");
+    expect(formatIntakeMicros([])).toBeNull();
+    expect(formatIntakeMicros(undefined)).toBeNull();
+    // Stray non-string entries are dropped, not rendered.
+    expect(formatIntakeMicros(["亜鉛 8mg", "" as string])).toBe("亜鉛 8mg");
+  });
+
+  it("the micros line appears in the context block with units when provided", () => {
+    const block = formatChatContext({
+      intakeKcal: 900,
+      intakeMicros: ["ビタミンC 80mg", "鉄 6.5mg", "カルシウム 300mg"],
+    } as ChatContext);
+    expect(block).toContain("・今日のビタミン・ミネラル（記録分）: ビタミンC 80mg / 鉄 6.5mg / カルシウム 300mg");
+  });
+
+  it("omits the micros line entirely when none were logged (no fabricated 0)", () => {
+    const block = formatChatContext({ intakeKcal: 900 } as ChatContext);
+    expect(block).not.toContain("ビタミン・ミネラル");
+  });
+});
+
+describe("拡張② — sleep auto-log protocol + computed energy (BMR/TDEE) in context", () => {
+  it("the sleep protocol is present in the built prompt with its markers", () => {
+    const prompt = buildChatPrompt(TURNS);
+    expect(prompt).toContain("【睡眠の自動記録について】");
+    expect(prompt).toContain("«SLEEP_LOG»");
+    expect(prompt).toContain("«/SLEEP_LOG»");
+    // It couples a save claim to the block like the meal/workout protocols.
+    expect(prompt).toContain("記録の整合性");
+    // The meal/workout protocols + the whole safety floor stay intact.
+    expectSafetyFloorIntact(prompt);
+  });
+
+  it("the sleep protocol requires an explicit RECORD intent before firing (Major-2)", () => {
+    // A casual sleep comment ("よく眠れた") must NOT auto-fire a sleep block; the
+    // coach should confirm intent first. The protocol states this requirement.
+    const prompt = buildChatPrompt(TURNS);
+    expect(prompt).toContain("【記録意図が必須】");
+    expect(prompt).toContain("睡眠として記録しておきますか？");
+    expectSafetyFloorIntact(prompt);
+  });
+
+  it("the final instruction lists the sleep block as an allowed appendix", () => {
+    const prompt = buildChatPrompt(TURNS);
+    expect(prompt).toContain("睡眠は «SLEEP_LOG»…«/SLEEP_LOG»");
+  });
+
+  it("formatChatContext renders BMR/TDEE so the coach can ground in 体格・代謝", () => {
+    const block = formatChatContext({ targetBmr: 1600, targetTdee: 2480 } as ChatContext);
+    expect(block).toContain("基礎代謝(BMR) 1600kcal");
+    expect(block).toContain("総消費(TDEE) 2480kcal");
+  });
+
+  it("omits the energy line when neither BMR nor TDEE is provided (no fabrication)", () => {
+    const block = formatChatContext({ goal: "減量" } as ChatContext);
+    expect(block).not.toContain("推定エネルギー");
   });
 });

@@ -31,6 +31,13 @@ import {
 } from "../_data/lookup";
 import { lookupAlias } from "./aliases";
 import { normalizeFull, normalizeName } from "./normalize";
+import {
+  cleanMicros,
+  scaleMicros,
+  sumMicros,
+  type MicroUnit,
+  type Micros,
+} from "./micros";
 
 export type Confidence = "low" | "medium" | "high";
 
@@ -74,6 +81,22 @@ export interface IdentifiedDish {
   protein_g?: number;
   fat_g?: number;
   carb_g?: number;
+  /**
+   * Additional model-supplied nutrients (label/estimate only; ignored for "db",
+   * where the DB supplies them). All OPTIONAL — the model may not know them, in
+   * which case they stay undefined (→ null downstream, never a fabricated 0).
+   * 食物繊維(g) / 糖質(g) / 塩分=ナトリウム(mg) / 飽和脂肪(g)。
+   */
+  fiber_g?: number;
+  sugar_g?: number;
+  sodium_mg?: number;
+  saturated_fat_g?: number;
+  /**
+   * Additional model-supplied vitamins/minerals (label/estimate only; ignored for
+   * "db", where the DB supplies them). A keyed bag (functions/_lib/micros.ts) —
+   * the model rarely reads these off a label, so it's usually absent → null.
+   */
+  micros?: Micros;
 }
 
 /** A single grounded line item. ALWAYS sourced; numbers may be null only when honestly unavailable. */
@@ -88,6 +111,22 @@ export interface GroundedItem {
   protein_g: number | null;
   fat_g: number | null;
   carb_g: number | null;
+  /**
+   * Additional nutrients for the estimated grams (「全栄養素を出す」). NULLABLE and
+   * INDEPENDENT of kcal: a matched DB food may have kcal/PFC but no measured fiber
+   * (→ fiber_g null), and the UI shows "—" for a null rather than a fabricated 0.
+   * 食物繊維(g) / 糖質(g) / 塩分=ナトリウム(mg) / 飽和脂肪(g)。
+   */
+  fiber_g: number | null;
+  sugar_g: number | null;
+  sodium_mg: number | null;
+  saturated_fat_g: number | null;
+  /**
+   * Vitamins/minerals for the estimated grams (拡張①). Same nullable contract as
+   * the other extras: a keyed bag with null per unmeasured micro, or undefined
+   * when the item carries no micro at all (UI shows "—"). Never a fabricated 0.
+   */
+  micros?: Micros;
   /** Data-source string for the numbers — null only when no number is available. */
   source: string | null;
   /** Machine-readable source tag driving the UI badge: db | label | estimate. */
@@ -111,14 +150,46 @@ export interface GroundedItem {
     protein_g: number;
     fat_g: number;
     carb_g: number;
+    /** Nullable extra nutrients per 100g (null when the DB row doesn't measure them). */
+    fiber_g: number | null;
+    sugar_g: number | null;
+    sodium_mg: number | null;
+    /** Saturated fat is NOT in the bundled table → always null for db items. */
+    saturated_fat_g: number | null;
+    /** Per-100g vitamins/minerals (拡張①), nullable per key; absent when the row
+     *  measures none. Carried so the client recomputes micros exactly on edit. */
+    micros?: Micros;
   };
 }
 
 export interface GroundedTotals {
   kcal: number;
-  protein_g: number;
-  fat_g: number;
-  carb_g: number;
+  /**
+   * PFC totals — NULLABLE (anti-fabrication). Summed ONLY over the numbered items
+   * that actually carry that macro (a kcal-only estimate item contributes its kcal
+   * but NOT a fake 0 protein). null when NO numbered item carried that macro (so a
+   * meal of kcal-only estimates shows protein "—", never a fabricated 0g). db
+   * items always carry PFC, so a normal meal still has real numbers here.
+   */
+  protein_g: number | null;
+  fat_g: number | null;
+  carb_g: number | null;
+  /**
+   * Extra-nutrient totals — NULLABLE. A total is null when NO numbered item
+   * contributed that nutrient (so we never show "0g fiber" for a meal whose foods
+   * simply have no fiber figure). When at least one item has it, the total is the
+   * sum over the items that DO (items missing it just don't add — honest partial).
+   */
+  fiber_g: number | null;
+  sugar_g: number | null;
+  sodium_mg: number | null;
+  saturated_fat_g: number | null;
+  /**
+   * Vitamin/mineral totals (拡張①). Per key: null when NO numbered item carried
+   * that micro, else the sum over items that DO. undefined when no item carried
+   * any micro (so the field is omitted; no fabricated "0µg ビタミンC").
+   */
+  micros?: Micros;
 }
 
 export interface GroundingResult {
@@ -563,10 +634,50 @@ function cleanNumber(n: unknown): number | null {
  * MAX_ITEM_KCAL. On rejection returns null (→ honest no-data) so a hallucinated
  * "50000 kcal" or a negative figure is never surfaced.
  */
+interface ModelNutrition {
+  kcal: number;
+  /**
+   * PFC stay NULLABLE (anti-fabrication): a label/estimate item may carry only a
+   * kcal figure (the model couldn't read the macros off the label / didn't state
+   * them). A MISSING macro is kept null — never coerced to a fabricated 0 — so the
+   * UI shows "—" and the meal/day totals sum it only over items that actually have
+   * it (same NULL-not-0 discipline as fiber/sugar/sodium and micros). An
+   * out-of-range macro is dropped to null (not the whole item).
+   */
+  protein_g: number | null;
+  fat_g: number | null;
+  carb_g: number | null;
+  /**
+   * Extra nutrients stay NULLABLE too: a missing fiber/sugar/sodium/saturated
+   * stays null so we never fabricate a 0 the model didn't state. An out-of-range
+   * extra is dropped to null (not the whole item) so one absurd fiber figure can't
+   * void an otherwise-good estimate.
+   */
+  fiber_g: number | null;
+  sugar_g: number | null;
+  sodium_mg: number | null;
+  saturated_fat_g: number | null;
+  /** Vitamins/minerals (拡張①) — keyed bag, nullable per key; undefined when none. */
+  micros?: Micros;
+}
+
+/**
+ * A generous physical ceiling for a model-supplied micro figure, per portion, by
+ * unit. A single food/serving can't realistically exceed a few hundred mg of a
+ * mineral or a few thousand µg of a vitamin per gram; we cap WAY above any real
+ * value, since the purpose is only to reject an absurd hallucination, not to
+ * second-guess a plausible figure. Out-of-range → dropped to null (not a reject
+ * of the whole item) by cleanMicros.
+ */
+function microCeil(grams: number): (unit: MicroUnit) => number {
+  const g = Math.max(grams, 1);
+  return (unit) => (unit === "mg" ? g * 1000 : g * 1_000_000);
+}
+
 function sanitizeModelNutrition(
   dish: IdentifiedDish,
   grams: number,
-): { kcal: number; protein_g: number; fat_g: number; carb_g: number } | null {
+): ModelNutrition | null {
   const kcal = cleanNumber(dish.kcal);
   const protein_g = cleanNumber(dish.protein_g);
   const fat_g = cleanNumber(dish.fat_g);
@@ -580,11 +691,29 @@ function sanitizeModelNutrition(
   for (const m of [protein_g, fat_g, carb_g]) {
     if (m !== null && m > gramsCeil) return null;
   }
+  // Extra gram-nutrients (fiber/sugar/saturated): same physical ceiling, but an
+  // over-range value is DROPPED to null (not a hard reject) — the macro PFC are
+  // the load-bearing figures, the extras are best-effort. Sodium is in mg, so it
+  // has its own (very generous) ceiling: even very salty food is < a few g/100g
+  // ≈ a few thousand mg; cap at the portion grams × 100 mg/g (1000mg per 10g).
+  const extraGCeil = gramsCeil; // grams of fiber/sugar/satfat can't exceed the food's weight
+  const sodiumCeil = Math.max(grams, 1) * 100; // mg ceiling — far above any real food
+  const cleanExtra = (v: number | null, ceil: number): number | null =>
+    v === null || v > ceil ? null : round1(v);
   return {
     kcal: round1(kcal),
-    protein_g: protein_g === null ? 0 : round1(protein_g),
-    fat_g: fat_g === null ? 0 : round1(fat_g),
-    carb_g: carb_g === null ? 0 : round1(carb_g),
+    // A MISSING macro stays null (NOT a fabricated 0) — anti-fabrication. The
+    // totals sum each macro only over items that actually carry it (see
+    // groundDishes), so an unmeasured macro shows "—" and never pollutes a sum.
+    protein_g: protein_g === null ? null : round1(protein_g),
+    fat_g: fat_g === null ? null : round1(fat_g),
+    carb_g: carb_g === null ? null : round1(carb_g),
+    fiber_g: cleanExtra(cleanNumber(dish.fiber_g), extraGCeil),
+    sugar_g: cleanExtra(cleanNumber(dish.sugar_g), extraGCeil),
+    sodium_mg: cleanExtra(cleanNumber(dish.sodium_mg), sodiumCeil),
+    saturated_fat_g: cleanExtra(cleanNumber(dish.saturated_fat_g), extraGCeil),
+    // Vitamins/minerals from the model (rare on a label) — sanitised per unit.
+    micros: cleanMicros(dish.micros, microCeil(grams)),
   };
 }
 
@@ -598,6 +727,10 @@ function noDataItem(name: string, grams: number): GroundedItem {
     protein_g: null,
     fat_g: null,
     carb_g: null,
+    fiber_g: null,
+    sugar_g: null,
+    sodium_mg: null,
+    saturated_fat_g: null,
     source: null,
     sourceKind: null,
     sourceLabel: null,
@@ -611,7 +744,7 @@ function modelSourcedItem(
   name: string,
   grams: number,
   kind: "label" | "estimate",
-  nums: { kcal: number; protein_g: number; fat_g: number; carb_g: number },
+  nums: ModelNutrition,
 ): GroundedItem {
   return {
     name,
@@ -621,6 +754,11 @@ function modelSourcedItem(
     protein_g: nums.protein_g,
     fat_g: nums.fat_g,
     carb_g: nums.carb_g,
+    fiber_g: nums.fiber_g,
+    sugar_g: nums.sugar_g,
+    sodium_mg: nums.sodium_mg,
+    saturated_fat_g: nums.saturated_fat_g,
+    micros: nums.micros,
     source: SOURCE_LABEL[kind],
     sourceKind: kind,
     sourceLabel: SOURCE_LABEL[kind],
@@ -653,6 +791,11 @@ export function groundDish(dish: IdentifiedDish): GroundedItem {
 
   if (food) {
     const factor = grams / 100;
+    // Extra nutrients are NULLABLE on the DB row: scale to the portion only when
+    // the table measured them, else carry null (never a fabricated 0). Saturated
+    // fat is not in the bundled table → always null for a 公式DB item.
+    const scaleOrNull = (per100: number | null): number | null =>
+      per100 === null ? null : round1(per100 * factor);
     return {
       name: dish.name,
       grams,
@@ -661,6 +804,12 @@ export function groundDish(dish: IdentifiedDish): GroundedItem {
       protein_g: round1(food.protein_g * factor),
       fat_g: round1(food.fat_g * factor),
       carb_g: round1(food.carb_g * factor),
+      fiber_g: scaleOrNull(food.fiber_g),
+      sugar_g: scaleOrNull(food.sugar_g),
+      sodium_mg: scaleOrNull(food.sodium_mg),
+      saturated_fat_g: null,
+      // Vitamins/minerals scaled to the portion (nullable per key; absent → undefined).
+      micros: scaleMicros(food.micros, factor),
       source: NUTRITION_SOURCE,
       sourceKind: "db",
       sourceLabel: SOURCE_LABEL.db,
@@ -674,6 +823,12 @@ export function groundDish(dish: IdentifiedDish): GroundedItem {
         protein_g: food.protein_g,
         fat_g: food.fat_g,
         carb_g: food.carb_g,
+        fiber_g: food.fiber_g,
+        sugar_g: food.sugar_g,
+        sodium_mg: food.sodium_mg,
+        saturated_fat_g: null,
+        // Per-100g micros carried so the client recomputes exactly on edit.
+        micros: food.micros ?? undefined,
       },
     };
   }
@@ -686,26 +841,43 @@ export function groundDish(dish: IdentifiedDish): GroundedItem {
   return noDataItem(dish.name, grams);
 }
 
+/**
+ * Sum one nullable extra-nutrient across items: null when NO item carried it (so
+ * a meal of foods with no fiber figure shows fiber "—", not a fake 0), else the
+ * sum over the items that DO have it (items missing it just don't add — an honest
+ * partial total). Mirrors the same rule client-side in mealItems.itemsToNutrition.
+ */
+function sumNullable(items: GroundedItem[], pick: (i: GroundedItem) => number | null): number | null {
+  const present = items.map(pick).filter((v): v is number => v !== null);
+  if (present.length === 0) return null;
+  return round1(present.reduce((a, b) => a + b, 0));
+}
+
 /** Ground a list of dishes; total EVERY numbered item (db + label + estimate). */
 export function groundDishes(dishes: IdentifiedDish[]): GroundingResult {
   const items = dishes.map(groundDish);
   const numbered = items.filter((it) => it.kcal !== null);
-  const totals = numbered.reduce<GroundedTotals>(
-    (acc, it) => ({
-      kcal: acc.kcal + (it.kcal ?? 0),
-      protein_g: acc.protein_g + (it.protein_g ?? 0),
-      fat_g: acc.fat_g + (it.fat_g ?? 0),
-      carb_g: acc.carb_g + (it.carb_g ?? 0),
-    }),
-    { kcal: 0, protein_g: 0, fat_g: 0, carb_g: 0 },
-  );
+  // kcal is summed over every numbered item (all have it by definition). PFC are
+  // summed ONLY over items that actually carry each macro (sumNullable), so a
+  // kcal-only estimate item adds its kcal but never a fabricated 0 protein, and a
+  // meal with no macro figures at all reports protein/fat/carb as null ("—").
+  const kcalTotal = numbered.reduce((acc, it) => acc + (it.kcal ?? 0), 0);
   return {
     items,
     totals: {
-      kcal: round1(totals.kcal),
-      protein_g: round1(totals.protein_g),
-      fat_g: round1(totals.fat_g),
-      carb_g: round1(totals.carb_g),
+      kcal: round1(kcalTotal),
+      protein_g: sumNullable(numbered, (i) => i.protein_g),
+      fat_g: sumNullable(numbered, (i) => i.fat_g),
+      carb_g: sumNullable(numbered, (i) => i.carb_g),
+      // Extra nutrients are summed only over items that actually carry them, and
+      // stay null when none do (no fabricated 0). Computed over numbered items.
+      fiber_g: sumNullable(numbered, (i) => i.fiber_g),
+      sugar_g: sumNullable(numbered, (i) => i.sugar_g),
+      sodium_mg: sumNullable(numbered, (i) => i.sodium_mg),
+      saturated_fat_g: sumNullable(numbered, (i) => i.saturated_fat_g),
+      // Vitamin/mineral totals: summed over numbered items that carry each micro;
+      // null per key when none do, undefined when no item carried any (拡張①).
+      micros: sumMicros(numbered.map((i) => i.micros)),
     },
     matchedCount: items.filter((i) => i.matched).length,
     numberedCount: numbered.length,

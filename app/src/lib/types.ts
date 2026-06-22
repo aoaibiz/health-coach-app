@@ -1,5 +1,9 @@
 // Shared domain types for the health app.
 
+import type { Micros } from "../../functions/_lib/micros";
+
+export type { Micros };
+
 export type MealType = "朝" | "昼" | "夕" | "間食";
 
 export const MEAL_TYPES: MealType[] = ["朝", "昼", "夕", "間食"];
@@ -29,6 +33,23 @@ export interface FoodBasisPer100g {
   proteinG: number;
   fatG: number;
   carbG: number;
+  /**
+   * Additional per-100g nutrients (「全栄養素を出す」). NULLABLE + optional so older
+   * saved items (pre-feature) load fine and a DB row that doesn't measure a
+   * nutrient carries null (recompute → null, shown as "—", never a fabricated 0).
+   * 食物繊維(g) / 糖質(g) / 塩分=ナトリウム(mg) / 飽和脂肪(g, db常にnull)。
+   */
+  fiberG?: number | null;
+  sugarG?: number | null;
+  sodiumMg?: number | null;
+  saturatedFatG?: number | null;
+  /**
+   * Per-100g vitamins/minerals (拡張①「ビタミン・ミネラルまで網羅」). A keyed bag
+   * (functions/_lib/micros.ts), nullable per key; optional + additive so older
+   * saved db items load fine. Carried so editing the portion recomputes the micros
+   * EXACTLY from the official table (recompute → null per unmeasured key → "—").
+   */
+  micros?: Micros;
 }
 
 /**
@@ -57,6 +78,22 @@ export interface MealItem {
   proteinG: number | null;
   fatG: number | null;
   carbG: number | null;
+  /**
+   * Additional computed nutrients for the effective weight (「全栄養素を出す」).
+   * NULLABLE + optional (additive): absent on pre-feature saved items; null when
+   * the source has no figure for that nutrient. Shown as "—" when null/absent —
+   * never a fabricated 0. 食物繊維(g) / 糖質(g) / 塩分=ナトリウム(mg) / 飽和脂肪(g)。
+   */
+  fiberG?: number | null;
+  sugarG?: number | null;
+  sodiumMg?: number | null;
+  saturatedFatG?: number | null;
+  /**
+   * Current computed vitamins/minerals for the effective weight (拡張①). A keyed
+   * bag, nullable per key; optional/additive (absent on pre-feature items, null
+   * per key when the source has no figure → "—", never a fabricated 0).
+   */
+  micros?: Micros;
   /** Which source backs this item's numbers (db | label | estimate). */
   sourceKind: NutritionSourceKind;
   /** Data-source string (公式DB name, or ラベル値/推定値). */
@@ -77,6 +114,21 @@ export interface MealItem {
   baseProteinG?: number | null;
   baseFatG?: number | null;
   baseCarbG?: number | null;
+  /**
+   * Proportional-scale anchors for the EXTRA nutrients of label/estimate items
+   * (same contract as baseKcal etc.). Optional/nullable: absent on db items and
+   * pre-feature records; null when the model gave no figure for that nutrient.
+   */
+  baseFiberG?: number | null;
+  baseSugarG?: number | null;
+  baseSodiumMg?: number | null;
+  baseSaturatedFatG?: number | null;
+  /**
+   * Proportional-scale anchor for the EXTRA micros of label/estimate items (拡張①;
+   * same contract as baseKcal). The model's micros for `baseGrams`; null per key
+   * when it gave none. Present ONLY for label/estimate items.
+   */
+  baseMicros?: Micros;
 }
 
 /**
@@ -92,12 +144,31 @@ export interface MealItem {
 export interface MealNutrition {
   /** kcal */
   calories?: number;
-  /** protein, grams */
-  proteinG?: number;
-  /** fat, grams */
-  fatG?: number;
-  /** carbohydrate, grams */
-  carbG?: number;
+  /**
+   * Protein/fat/carb, grams. NULLABLE: a plain manual entry may omit them, and an
+   * item-summed total is null when NO contributing item carried that macro (a meal
+   * of kcal-only estimates shows protein "—", never a fabricated 0g). Shown as "—"
+   * when null/absent. Same NULL-not-0 discipline as the extra nutrients below.
+   */
+  proteinG?: number | null;
+  fatG?: number | null;
+  carbG?: number | null;
+  /**
+   * Additional summed nutrients (「全栄養素を出す」). NULLABLE + optional (additive):
+   * absent on pre-feature saved meals and plain manual entries; null when no
+   * contributing item carried that nutrient (so a meal never shows a fabricated
+   * "0g 食物繊維"). 食物繊維(g) / 糖質(g) / 塩分=ナトリウム(mg) / 飽和脂肪(g)。
+   */
+  fiberG?: number | null;
+  sugarG?: number | null;
+  sodiumMg?: number | null;
+  saturatedFatG?: number | null;
+  /**
+   * Summed vitamins/minerals for the meal (拡張①). A keyed bag, nullable per key;
+   * optional/additive — absent on pre-feature meals, null per key when no item
+   * carried that micro (so a meal never shows a fabricated "0µg ビタミンC").
+   */
+  micros?: Micros;
   /**
    * Data source/method backing the numbers (e.g. "日本食品標準成分表(八訂)増補2023").
    * Present for AI-grounded estimates; absent for plain manual entry. Required
@@ -209,6 +280,33 @@ export interface Workout {
   /** ISO date (YYYY-MM-DD) — one workout document per day. */
   date: string;
   exercises: Exercise[];
+  updatedAt: string;
+}
+
+// ---- Sleep (睡眠メニュー) ---------------------------------------------------
+
+/**
+ * One night's sleep logged for a given calendar day (the day the user WOKE on /
+ * the day they are recording for — keyed like meals/workouts by `date`). The user
+ * enters 就寝時刻 (bedtime) and 起床時刻 (wakeTime) as local "HH:MM"; the duration is
+ * DERIVED (sleepDurationMin), never typed in, with overnight handling (就寝23:00 →
+ * 起床07:00 = 8h). One document per day (last save wins), mirroring Workout.
+ *
+ * Additive + self-contained: stored in its own localStorage key, so adding it
+ * touches no existing meal/workout/profile data. All fields required except the
+ * derived/cached minutes, which is optional so a hand-written record still loads.
+ */
+export interface SleepLog {
+  /** ISO date (YYYY-MM-DD) the sleep belongs to. */
+  date: string;
+  /** 就寝時刻, local "HH:MM" (24h). */
+  bedtime: string;
+  /** 起床時刻, local "HH:MM" (24h). */
+  wakeTime: string;
+  /** Derived sleep length in minutes (overnight-aware). Optional cache; the UI
+   *  recomputes from bedtime/wakeTime so a missing/garbage value can't mislead. */
+  durationMin?: number;
+  /** ISO timestamp of the last save (for cross-device merge parity, like Workout). */
   updatedAt: string;
 }
 

@@ -36,6 +36,11 @@ export function analysisToChatContext(nutrition: MealNutrition): ChatMealAnalysi
     proteinG: it.proteinG,
     fatG: it.fatG,
     carbG: it.carbG,
+    fiberG: it.fiberG ?? null,
+    sugarG: it.sugarG ?? null,
+    sodiumMg: it.sodiumMg ?? null,
+    saturatedFatG: it.saturatedFatG ?? null,
+    micros: it.micros,
     sourceLabel: it.source ?? null,
     sourceKind: it.sourceKind,
   }));
@@ -92,6 +97,13 @@ function reconcileWithAnalysis(
       ...(typeof match.proteinG === "number" ? { protein_g: match.proteinG } : {}),
       ...(typeof match.fatG === "number" ? { fat_g: match.fatG } : {}),
       ...(typeof match.carbG === "number" ? { carb_g: match.carbG } : {}),
+      // Extra nutrients too — only when the analysis grounded a number for them.
+      ...(typeof match.fiberG === "number" ? { fiber_g: match.fiberG } : {}),
+      ...(typeof match.sugarG === "number" ? { sugar_g: match.sugarG } : {}),
+      ...(typeof match.sodiumMg === "number" ? { sodium_mg: match.sodiumMg } : {}),
+      ...(typeof match.saturatedFatG === "number" ? { saturated_fat_g: match.saturatedFatG } : {}),
+      // Vitamins/minerals (拡張①): copy the analysis's grounded micros when present.
+      ...(match.micros ? { micros: match.micros } : {}),
     };
   });
 }

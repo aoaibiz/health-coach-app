@@ -43,6 +43,13 @@ export function groundManualItem(id: string, name: string, grams: number): MealI
         proteinG: food.protein_g,
         fatG: food.fat_g,
         carbG: food.carb_g,
+        // Extra nutrients from the DB row (nullable; saturated never in the table).
+        fiberG: food.fiber_g,
+        sugarG: food.sugar_g,
+        sodiumMg: food.sodium_mg,
+        saturatedFatG: null,
+        // Vitamins/minerals from the DB row (拡張①; nullable per key, absent → undefined).
+        micros: food.micros ?? undefined,
       },
     });
   }
@@ -124,7 +131,7 @@ export function groundMealLogItem(payload: MealLogItemPayload): MealItem {
   // basis. Applies on EVERY branch below, so the invariant holds for db,
   // label/estimate and the fallback alike (and on append + correct via
   // buildLoggedMeal → groundMealLogItems).
-  const { grams } = resolveGrams(payload.grams);
+  const { grams, defaulted: portionDefaulted } = resolveGrams(payload.grams);
   const qty = clampQty(payload.qty ?? 1);
   const source: NutritionSourceKind = payload.source ?? "db";
 
@@ -135,6 +142,13 @@ export function groundMealLogItem(payload: MealLogItemPayload): MealItem {
   // model's labelled estimate (see the label/estimate branch below).
   const food = findFood(payload.name);
   if (food && source === "db") {
+    // The kcal/PFC are EXACT from the official DB basis, so the number is honest.
+    // But when the PORTION was a silent default (the user/model never stated an
+    // amount), the figure rests on a guessed serving — so we drop the per-item
+    // confidence from "high" to "medium" so the meal's confidence summary reflects
+    // the estimated portion. The source stays 公式DB (the per-100g basis really is
+    // the DB's) — we never mislabel it, we just stop presenting a guessed portion
+    // as a fully-confirmed value (anti-"適当に入れてる" honesty).
     const item = toMealItem({
       id: makeId(),
       name: payload.name,
@@ -145,7 +159,7 @@ export function groundMealLogItem(payload: MealLogItemPayload): MealItem {
       carbG: null,
       sourceKind: "db",
       source: NUTRITION_SOURCE,
-      confidence: "high",
+      confidence: portionDefaulted ? "medium" : "high",
       foodCode: food.food_code,
       basisPer100g: {
         foodCode: food.food_code,
@@ -153,6 +167,13 @@ export function groundMealLogItem(payload: MealLogItemPayload): MealItem {
         proteinG: food.protein_g,
         fatG: food.fat_g,
         carbG: food.carb_g,
+        // Extra nutrients from the DB row (nullable; saturated never in the table).
+        fiberG: food.fiber_g,
+        sugarG: food.sugar_g,
+        sodiumMg: food.sodium_mg,
+        saturatedFatG: null,
+        // Vitamins/minerals from the DB row (拡張①; nullable per key, absent → undefined).
+        micros: food.micros ?? undefined,
       },
     });
     return setItemQty(item, qty);
@@ -160,7 +181,9 @@ export function groundMealLogItem(payload: MealLogItemPayload): MealItem {
 
   // label / estimate: the model supplies the numbers (sanitised). Reject an
   // absurd kcal (>MAX_ITEM_KCAL) or a missing kcal → an honest 推定 row with no
-  // number. PFC are optional and default to 0 when absent (mirrors ground.ts).
+  // number. PFC stay NULLABLE: a label/estimate item may carry only kcal, so a
+  // missing macro is kept null (NOT a fabricated 0) — mirrors ground.ts. The meal
+  // total then sums each macro only over items that actually have it.
   if (source === "label" || source === "estimate") {
     const kcal = cleanAnchor(payload.kcal, MAX_ITEM_KCAL);
     if (kcal !== null) {
@@ -169,9 +192,19 @@ export function groundMealLogItem(payload: MealLogItemPayload): MealItem {
         name: payload.name,
         grams,
         kcal,
-        proteinG: cleanAnchor(payload.protein_g) ?? 0,
-        fatG: cleanAnchor(payload.fat_g) ?? 0,
-        carbG: cleanAnchor(payload.carb_g) ?? 0,
+        // A MISSING macro stays null (cleanAnchor → null for missing/garbage), so an
+        // unmeasured PFC shows "—" and never pollutes the meal total as a fake 0.
+        proteinG: cleanAnchor(payload.protein_g),
+        fatG: cleanAnchor(payload.fat_g),
+        carbG: cleanAnchor(payload.carb_g),
+        // Extra nutrients stay NULLABLE too: the model may not state them. cleanAnchor
+        // returns null for missing/garbage, so an unknown extra stays "—".
+        fiberG: cleanAnchor(payload.fiber_g),
+        sugarG: cleanAnchor(payload.sugar_g),
+        sodiumMg: cleanAnchor(payload.sodium_mg),
+        saturatedFatG: cleanAnchor(payload.saturated_fat_g),
+        // Vitamins/minerals (拡張①): the parser already sanitised these per key.
+        micros: payload.micros,
         sourceKind: source,
         source: source === "label" ? "ラベル値" : "推定値",
         confidence: source === "label" ? "medium" : "low",

@@ -30,6 +30,7 @@ import {
   type SourceKind,
 } from "../_lib/ground";
 import type { MealVisionProvider } from "../_llm/provider";
+import type { Micros } from "../_lib/micros";
 // A member's Cloudflare Pages (Workers) deploy is ALWAYS own-key, so the
 // onRequestPost path uses the WORKER-SAFE selector (./select-own) that imports
 // ONLY the fetch-native Gemini provider — never ../_llm/select, which references
@@ -58,6 +59,13 @@ export interface AnalyzedItem {
   protein_g: number | null;
   fat_g: number | null;
   carb_g: number | null;
+  /** Additional nutrients (「全栄養素を出す」) — NULLABLE (null = honestly unknown). */
+  fiber_g: number | null;
+  sugar_g: number | null;
+  sodium_mg: number | null;
+  saturated_fat_g: number | null;
+  /** Vitamins/minerals (拡張①) — keyed bag, nullable per key; absent when none. */
+  micros?: Micros;
   source: string | null;
   /** Machine-readable source tag (db | label | estimate) driving the UI badge. */
   sourceKind: SourceKind | null;
@@ -73,12 +81,36 @@ export interface AnalyzedItem {
    * Matched DB row per-100g figures (db items only). Lets the client recompute
    * a db item EXACTLY from the official table on a portion edit (stays 公式DB).
    */
-  basisPer100g?: { kcal: number; protein_g: number; fat_g: number; carb_g: number };
+  basisPer100g?: {
+    kcal: number;
+    protein_g: number;
+    fat_g: number;
+    carb_g: number;
+    fiber_g: number | null;
+    sugar_g: number | null;
+    sodium_mg: number | null;
+    saturated_fat_g: number | null;
+    /** Per-100g vitamins/minerals (拡張①) — for exact client recompute on edit. */
+    micros?: Micros;
+  };
 }
 
 export interface AnalyzeMealResponse {
   items: AnalyzedItem[];
-  totals: { kcal: number; protein_g: number; fat_g: number; carb_g: number };
+  totals: {
+    kcal: number;
+    /** PFC totals — NULLABLE: summed only over items that carry each macro; null
+     *  when no numbered item did (a kcal-only estimate meal shows "—", never 0). */
+    protein_g: number | null;
+    fat_g: number | null;
+    carb_g: number | null;
+    fiber_g: number | null;
+    sugar_g: number | null;
+    sodium_mg: number | null;
+    saturated_fat_g: number | null;
+    /** Vitamin/mineral day-portion totals (拡張①) — nullable per key; absent when none. */
+    micros?: Micros;
+  };
   generatedBy: string;
   /** Number of dishes that matched the official DB. */
   matchedCount: number;
@@ -180,6 +212,11 @@ export async function handleAnalyzeMeal(
       protein_g: it.protein_g,
       fat_g: it.fat_g,
       carb_g: it.carb_g,
+      fiber_g: it.fiber_g,
+      sugar_g: it.sugar_g,
+      sodium_mg: it.sodium_mg,
+      saturated_fat_g: it.saturated_fat_g,
+      micros: it.micros,
       source: it.source,
       sourceKind: it.sourceKind,
       sourceLabel: it.sourceLabel,

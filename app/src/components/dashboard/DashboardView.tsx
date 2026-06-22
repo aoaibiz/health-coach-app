@@ -10,6 +10,8 @@ import { MacroProgress } from "@/components/MacroProgress";
 import { Disclaimer } from "@/components/Disclaimer";
 import { WeightSection } from "@/components/dashboard/WeightSection";
 import { useDailyData } from "@/components/dashboard/useDailyData";
+import { MicroNutrientsPanel } from "@/components/nutrition/MicroNutrientsPanel";
+import { hasAnyMicro } from "../../../functions/_lib/micros";
 import { hasApiKey } from "@/lib/analyzeMeal";
 import { suggestNext } from "@/lib/suggest";
 import { formatNumber } from "@/lib/workout";
@@ -182,6 +184,35 @@ function DashboardBody({
         )}
       </section>
 
+      {/* Other nutrients (「全栄養素を出す」) — only shown when the day has at least
+          one logged figure for any of them (all-null → section hidden, never a
+          fabricated 0). */}
+      {(intake.fiberG != null ||
+        intake.sugarG != null ||
+        intake.sodiumMg != null ||
+        intake.saturatedFatG != null ||
+        hasAnyMicro(intake.micros)) && (
+        <section className="surface space-y-3 p-5">
+          <h2 className="text-sm font-bold text-slate-700 dark:text-navy-100">
+            その他の栄養素（今日の合計）
+          </h2>
+          <div className="grid grid-cols-2 gap-2.5">
+            <NutrientStat label="食物繊維" value={intake.fiberG} unit="g" />
+            <NutrientStat label="糖質（参考）" value={intake.sugarG} unit="g" />
+            <NutrientStat label="塩分（ナトリウム）" value={intake.sodiumMg} unit="mg" />
+            <NutrientStat label="飽和脂肪" value={intake.saturatedFatG} unit="g" />
+          </div>
+          {/* Vitamins/minerals (拡張①) — grouped + collapsible (many fields). */}
+          <MicroNutrientsPanel
+            micros={intake.micros}
+            summary="ビタミン・ミネラル（今日の合計）"
+          />
+          <p className="text-[11px] leading-relaxed text-slate-400 dark:text-navy-400">
+            データの無い栄養素は「—」と表示します（推測で0は入れません）。
+          </p>
+        </section>
+      )}
+
       {/* Weight tracking — log today's weight, current vs target, 推移グラフ */}
       <WeightSection targetWeightKg={data.profile?.targetWeightKg} />
 
@@ -231,6 +262,34 @@ function Stat({
       <p className={`text-lg font-bold tabular-nums ${accent}`}>
         {value !== 0 ? prefix : ""}
         {formatNumber(value)}
+      </p>
+    </div>
+  );
+}
+
+/** A nutrient figure for the dashboard "その他の栄養素" grid. A null value renders
+ *  an honest "—" (the nutrient was not measured for any logged food today). */
+function NutrientStat({
+  label,
+  value,
+  unit,
+}: {
+  label: string;
+  value: number | null;
+  unit: string;
+}) {
+  return (
+    <div className="rounded-xl bg-slate-50 py-3 px-3 dark:bg-navy-800/60">
+      <p className="text-xs text-slate-400 dark:text-navy-400">{label}</p>
+      <p className="mt-0.5 text-lg font-bold tabular-nums text-slate-800 dark:text-navy-50">
+        {value != null ? (
+          <>
+            {formatNumber(value)}
+            <span className="ml-0.5 text-xs font-normal text-slate-400">{unit}</span>
+          </>
+        ) : (
+          <span className="text-slate-300 dark:text-navy-500">—</span>
+        )}
       </p>
     </div>
   );

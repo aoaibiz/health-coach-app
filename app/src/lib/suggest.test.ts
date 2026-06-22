@@ -14,7 +14,18 @@ const targets: NutritionTargets = {
 };
 
 function intake(overrides: Partial<IntakeTotals> = {}): IntakeTotals {
-  return { calories: 0, proteinG: 0, fatG: 0, carbG: 0, loggedCount: 0, ...overrides };
+  return {
+    calories: 0,
+    proteinG: 0,
+    fatG: 0,
+    carbG: 0,
+    fiberG: null,
+    sugarG: null,
+    sodiumMg: null,
+    saturatedFatG: null,
+    loggedCount: 0,
+    ...overrides,
+  };
 }
 
 describe("suggestNext", () => {

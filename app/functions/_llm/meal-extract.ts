@@ -41,7 +41,7 @@ export const PROMPT = [
   "",
   "出力は次の形式の JSON ブロックを **1つだけ** 出してください。それ以外の文章・前置き・説明は一切書かないこと:",
   "```json",
-  '{"dishes":[{"name":"<日本語の食品名>","grams":<数値>,"source":"db|label|estimate","confidence":"high|medium|low","kcal":<数値>,"protein_g":<数値>,"fat_g":<数値>,"carb_g":<数値>}]}',
+  '{"dishes":[{"name":"<日本語の食品名>","grams":<数値>,"source":"db|label|estimate","confidence":"high|medium|low","kcal":<数値>,"protein_g":<数値>,"fat_g":<数値>,"carb_g":<数値>,"fiber_g":<数値>,"sugar_g":<数値>,"sodium_mg":<数値>,"saturated_fat_g":<数値>,"micros":{"vitaminC":<数値>,"iron":<数値>,"calcium":<数値>}}]}',
   "```",
   "",
   "source の判定（最重要）:",
@@ -50,6 +50,8 @@ export const PROMPT = [
   '- "estimate": 公式DBにも無く、ラベルも読めない/写っていない市販品・サプリ・外食など。一般的な知識から kcal/PFC を推定して返す（参考値）。',
   "",
   "ルール:",
+  '- 栄養素は kcal/protein_g/fat_g/carb_g に加えて、可能なら fiber_g（食物繊維 g）, sugar_g（糖質/糖類 g）, sodium_mg（塩分=ナトリウム mg）, saturated_fat_g（飽和脂肪 g）も返す。これらは "label"/"estimate" の品目のときだけ（その grams ぶんの値で）。**分からない栄養素は推測で埋めず、そのキーを省略すること（0 を入れない）**。"db" の品目では一切の栄養値を出さない（公式DBが計算する）。',
+  '- ビタミン・ミネラル（micros）: ラベルに **実際に記載されている** ビタミン/ミネラルだけ、その grams ぶんの値を micros オブジェクトに入れてよい（キー例: vitaminA, vitaminD, vitaminE, vitaminK, vitaminB1, vitaminB2, niacin, vitaminB6, vitaminB12, folate, vitaminC, potassium, calcium, magnesium, phosphorus, iron, zinc, copper。mg または µg はラベルの単位に合わせる）。**ラベルに無い・読めないビタミン/ミネラルは推測で作らず、必ずキーごと省略すること**（"db" 品目では一切出さない＝公式DBが計算する）。読み取れるものが無ければ micros 自体を省略する。',
   '- 写真に栄養成分表示が **実際に写っている** ときだけ "label" にする。ラベルが読めないのに "label" と偽らないこと（その場合は "estimate"）。',
   "- 複合料理（例: 親子丼, カレーライス, ラーメン, 牛丼, チャーハン）は、標準食材に分解できるものは分解して各 source=db で返す。分解できない一品物（外食の盛り合わせ等）は estimate で1品として返してよい。",
   "- 分解しても写真から分からない食材は無理に作らないこと。不明な具材や調味料は省略してよい。",
@@ -96,6 +98,11 @@ function toDish(raw: unknown): IdentifiedDish | null {
     protein_g?: unknown;
     fat_g?: unknown;
     carb_g?: unknown;
+    fiber_g?: unknown;
+    sugar_g?: unknown;
+    sodium_mg?: unknown;
+    saturated_fat_g?: unknown;
+    micros?: unknown;
   };
   const name = typeof r.name === "string" ? r.name.trim() : "";
   if (!name) return null;
@@ -118,6 +125,21 @@ function toDish(raw: unknown): IdentifiedDish | null {
     if (protein_g !== undefined) dish.protein_g = protein_g;
     if (fat_g !== undefined) dish.fat_g = fat_g;
     if (carb_g !== undefined) dish.carb_g = carb_g;
+    // Extra nutrients (optional): carried through only when the model supplied a
+    // clean number; absent → left undefined → null downstream (no fabricated 0).
+    const fiber_g = num(r.fiber_g);
+    const sugar_g = num(r.sugar_g);
+    const sodium_mg = num(r.sodium_mg);
+    const saturated_fat_g = num(r.saturated_fat_g);
+    if (fiber_g !== undefined) dish.fiber_g = fiber_g;
+    if (sugar_g !== undefined) dish.sugar_g = sugar_g;
+    if (sodium_mg !== undefined) dish.sodium_mg = sodium_mg;
+    if (saturated_fat_g !== undefined) dish.saturated_fat_g = saturated_fat_g;
+    // Vitamins/minerals (拡張①): carried through as a raw object only; ground.ts
+    // sanitises each key (cleanMicros) before it ever reaches the client/UI.
+    if (r.micros && typeof r.micros === "object" && !Array.isArray(r.micros)) {
+      dish.micros = r.micros as IdentifiedDish["micros"];
+    }
   }
   return dish;
 }

@@ -9,6 +9,7 @@ import type {
   EstimateConfidence,
   MealItem,
   MealNutrition,
+  Micros,
   NutritionSourceKind,
 } from "./types";
 import { makeId } from "./date";
@@ -25,6 +26,13 @@ export interface AnalyzeMealApiResponse {
     protein_g: number | null;
     fat_g: number | null;
     carb_g: number | null;
+    /** Extra nutrients (「全栄養素を出す」) — NULLABLE (null = honestly unknown). */
+    fiber_g?: number | null;
+    sugar_g?: number | null;
+    sodium_mg?: number | null;
+    saturated_fat_g?: number | null;
+    /** Vitamins/minerals (拡張①) — keyed bag, nullable per key; absent when none. */
+    micros?: Micros;
     source: string | null;
     sourceKind: NutritionSourceKind | null;
     sourceLabel: string | null;
@@ -34,9 +42,33 @@ export interface AnalyzeMealApiResponse {
     /** Matched DB row food_code (db items only). */
     foodCode?: string;
     /** Matched DB row per-100g figures (db items only) — for exact client recompute. */
-    basisPer100g?: { kcal: number; protein_g: number; fat_g: number; carb_g: number };
+    basisPer100g?: {
+      kcal: number;
+      protein_g: number;
+      fat_g: number;
+      carb_g: number;
+      fiber_g?: number | null;
+      sugar_g?: number | null;
+      sodium_mg?: number | null;
+      saturated_fat_g?: number | null;
+      /** Per-100g vitamins/minerals (拡張①) for exact recompute on edit. */
+      micros?: Micros;
+    };
   }>;
-  totals: { kcal: number; protein_g: number; fat_g: number; carb_g: number };
+  totals: {
+    kcal: number;
+    /** PFC totals — NULLABLE: summed only over items that carry each macro; null
+     *  when no numbered item did (a kcal-only estimate meal shows "—", never 0). */
+    protein_g: number | null;
+    fat_g: number | null;
+    carb_g: number | null;
+    fiber_g?: number | null;
+    sugar_g?: number | null;
+    sodium_mg?: number | null;
+    saturated_fat_g?: number | null;
+    /** Vitamin/mineral totals (拡張①) — nullable per key; absent when none. */
+    micros?: Micros;
+  };
   generatedBy: string;
   matchedCount: number;
   numberedCount: number;
@@ -109,6 +141,11 @@ export function toMealNutrition(res: AnalyzeMealApiResponse): MealNutrition | nu
         proteinG: i.protein_g,
         fatG: i.fat_g,
         carbG: i.carb_g,
+        fiberG: i.fiber_g ?? null,
+        sugarG: i.sugar_g ?? null,
+        sodiumMg: i.sodium_mg ?? null,
+        saturatedFatG: i.saturated_fat_g ?? null,
+        micros: i.micros,
         sourceKind: i.sourceKind as NutritionSourceKind,
         source: i.source ?? undefined,
         confidence: i.confidence,
@@ -120,6 +157,11 @@ export function toMealNutrition(res: AnalyzeMealApiResponse): MealNutrition | nu
               proteinG: i.basisPer100g.protein_g,
               fatG: i.basisPer100g.fat_g,
               carbG: i.basisPer100g.carb_g,
+              fiberG: i.basisPer100g.fiber_g ?? null,
+              sugarG: i.basisPer100g.sugar_g ?? null,
+              sodiumMg: i.basisPer100g.sodium_mg ?? null,
+              saturatedFatG: i.basisPer100g.saturated_fat_g ?? null,
+              micros: i.basisPer100g.micros,
             }
           : undefined,
       }),
@@ -133,6 +175,14 @@ export function toMealNutrition(res: AnalyzeMealApiResponse): MealNutrition | nu
     proteinG: derived?.proteinG ?? res.totals.protein_g,
     fatG: derived?.fatG ?? res.totals.fat_g,
     carbG: derived?.carbG ?? res.totals.carb_g,
+    // Extra nutrients (nullable): prefer the derived item-sum; else the response
+    // totals (?? null when the field is absent — never a fabricated 0).
+    fiberG: derived ? derived.fiberG : (res.totals.fiber_g ?? null),
+    sugarG: derived ? derived.sugarG : (res.totals.sugar_g ?? null),
+    sodiumMg: derived ? derived.sodiumMg : (res.totals.sodium_mg ?? null),
+    saturatedFatG: derived ? derived.saturatedFatG : (res.totals.saturated_fat_g ?? null),
+    // Vitamin/mineral totals (拡張①): derived item-sum when present, else response totals.
+    micros: derived ? derived.micros : res.totals.micros,
     source: dbSource ?? anySource ?? undefined,
     confidence: summarizeConfidence(res),
     generatedBy: res.generatedBy,

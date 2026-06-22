@@ -14,12 +14,16 @@ function meal(overrides: Partial<Meal> = {}): Meal {
 }
 
 describe("sumIntake", () => {
-  it("returns all zeros for no meals", () => {
+  it("returns all zeros for no meals (extra nutrients null — no data)", () => {
     expect(sumIntake([])).toEqual({
       calories: 0,
       proteinG: 0,
       fatG: 0,
       carbG: 0,
+      fiberG: null,
+      sugarG: null,
+      sodiumMg: null,
+      saturatedFatG: null,
       loggedCount: 0,
     });
   });
@@ -46,6 +50,10 @@ describe("sumIntake", () => {
       proteinG: 70,
       fatG: 35,
       carbG: 140,
+      fiberG: null,
+      sugarG: null,
+      sodiumMg: null,
+      saturatedFatG: null,
       loggedCount: 2,
     });
   });
@@ -57,7 +65,31 @@ describe("sumIntake", () => {
       proteinG: 0,
       fatG: 0,
       carbG: 0,
+      fiberG: null,
+      sugarG: null,
+      sodiumMg: null,
+      saturatedFatG: null,
       loggedCount: 1,
     });
+  });
+
+  it("sums extra nutrients only over meals that carry them (others stay null)", () => {
+    const r = sumIntake([
+      meal({ nutrition: { calories: 200, fiberG: 3, sodiumMg: 100 } }),
+      meal({ nutrition: { calories: 150, fiberG: 2 } }), // no sodium → not fabricated
+    ]);
+    expect(r.fiberG).toBeCloseTo(5, 1); // 3 + 2
+    expect(r.sodiumMg).toBe(100); // only the first meal had it
+    expect(r.sugarG).toBeNull(); // no meal had sugar → null, not 0
+    expect(r.saturatedFatG).toBeNull();
+  });
+
+  it("a day with no extra-nutrient figures keeps them null (no fabricated 0)", () => {
+    const r = sumIntake([meal({ nutrition: { calories: 400, proteinG: 20 } })]);
+    expect(r.calories).toBe(400);
+    expect(r.fiberG).toBeNull();
+    expect(r.sugarG).toBeNull();
+    expect(r.sodiumMg).toBeNull();
+    expect(r.saturatedFatG).toBeNull();
   });
 });

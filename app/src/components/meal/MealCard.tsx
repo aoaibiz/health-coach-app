@@ -4,6 +4,7 @@ import { formatTime } from "@/lib/date";
 import { formatNumber } from "@/lib/workout";
 import type { Meal } from "@/lib/types";
 import { PhotoImage } from "../PhotoImage";
+import { MicroNutrientsPanel } from "../nutrition/MicroNutrientsPanel";
 import { PencilIcon, TrashIcon } from "../icons";
 
 interface Props {
@@ -117,7 +118,27 @@ export function MealCard({ meal, onEdit, onDelete }: Props) {
             {meal.nutrition.carbG != null && (
               <MacroTag label="C" value={meal.nutrition.carbG} className="text-sky-500" />
             )}
+            {/* Extra nutrients (「全栄養素を出す」) — only shown when a real figure
+                exists (null/absent → omitted, never a fabricated 0 / "—"). */}
+            {meal.nutrition.fiberG != null && (
+              <NutTag label="食物繊維" value={meal.nutrition.fiberG} unit="g" />
+            )}
+            {meal.nutrition.sugarG != null && (
+              <NutTag label="糖質" value={meal.nutrition.sugarG} unit="g" />
+            )}
+            {meal.nutrition.sodiumMg != null && (
+              <NutTag label="塩分(Na)" value={meal.nutrition.sodiumMg} unit="mg" />
+            )}
+            {meal.nutrition.saturatedFatG != null && (
+              <NutTag label="飽和脂肪" value={meal.nutrition.saturatedFatG} unit="g" />
+            )}
           </div>
+        )}
+
+        {/* Vitamins/minerals (拡張①) — collapsed by default (many), grouped into
+            ビタミン群/ミネラル群. Hidden entirely when no real figure exists. */}
+        {meal.nutrition?.micros && (
+          <MicroNutrientsPanel micros={meal.nutrition.micros} className="mt-2.5" />
         )}
 
         {/* When the total includes a 推定/ラベル value, say so unmistakably. */}
@@ -154,6 +175,17 @@ function MacroTag({
   return (
     <span className="rounded-md bg-slate-50 px-2 py-0.5 text-xs tabular-nums text-slate-500 dark:bg-navy-800/60 dark:text-navy-300">
       <span className={`font-bold ${className}`}>{label}</span> {formatNumber(value)}g
+    </span>
+  );
+}
+
+/** A compact tag for an extra nutrient (食物繊維/糖質/塩分/飽和脂肪). Only rendered
+ *  by the caller when a real value exists — never for null/unknown. */
+function NutTag({ label, value, unit }: { label: string; value: number; unit: string }) {
+  return (
+    <span className="rounded-md bg-slate-50 px-2 py-0.5 text-xs tabular-nums text-slate-400 dark:bg-navy-800/60 dark:text-navy-400">
+      {label} {formatNumber(value)}
+      {unit}
     </span>
   );
 }

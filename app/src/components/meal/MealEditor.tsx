@@ -99,7 +99,7 @@ export function MealEditor({
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Optional manual nutrition (kept as input strings; parsed on save).
-  const toStr = (n?: number) => (n != null ? String(n) : "");
+  const toStr = (n?: number | null) => (n != null ? String(n) : "");
   const [cal, setCal] = useState(toStr(existing?.nutrition?.calories));
   const [protein, setProtein] = useState(toStr(existing?.nutrition?.proteinG));
   const [fat, setFat] = useState(toStr(existing?.nutrition?.fatG));

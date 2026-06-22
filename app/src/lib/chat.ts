@@ -13,8 +13,9 @@ import { activityLabel, bodyTypeLabel, goalLabel, sexLabel } from "./profileView
 import { clampGrams, clampQty } from "./mealItems";
 import { isWeightedExercise } from "./burn";
 import { setsFor, summarizeSets } from "./workoutSets";
+import { microDef } from "../../functions/_lib/micros";
 import type { IntakeTotals } from "./intake";
-import type { Exercise, Meal, NutritionTargets, Profile } from "./types";
+import type { Exercise, Meal, Micros, NutritionTargets, Profile } from "./types";
 
 /** One grounded item from a photo analysis, forwarded so the coach can narrate it. */
 export interface ChatMealAnalysisItem {
@@ -24,6 +25,14 @@ export interface ChatMealAnalysisItem {
   proteinG?: number | null;
   fatG?: number | null;
   carbG?: number | null;
+  /** Extra nutrients (「全栄養素を出す」) — nullable; forwarded so a chat-logged
+   *  label/estimate keeps them and the coach can narrate them. */
+  fiberG?: number | null;
+  sugarG?: number | null;
+  sodiumMg?: number | null;
+  saturatedFatG?: number | null;
+  /** Vitamins/minerals (拡張①) — forwarded so a chat-logged label/estimate keeps them. */
+  micros?: Micros;
   sourceLabel?: string | null;
   sourceKind?: "db" | "label" | "estimate" | null;
 }
@@ -96,6 +105,10 @@ export interface ChatContext {
   /** WHAT exercises were logged today (name + compact set summary) — own logged data. */
   loggedWorkoutItems?: string[];
   goal?: string;
+  /** Basal metabolic rate (kcal) from the profile (拡張②: 体格・代謝を考慮). */
+  targetBmr?: number;
+  /** Total daily energy expenditure (kcal) from the profile (拡張②). */
+  targetTdee?: number;
   targetKcal?: number;
   targetProteinG?: number;
   targetFatG?: number;
@@ -104,10 +117,48 @@ export interface ChatContext {
   intakeProteinG?: number;
   intakeFatG?: number;
   intakeCarbG?: number;
+  /**
+   * Today's intake of the MAJOR vitamins/minerals (拡張①), as compact pre-formatted
+   * "label value unit" lines (e.g. "ビタミンC 80mg") so the coach can ground micro
+   * advice. BOUNDED: only the curated 主要 set, and only the micros that today's
+   * meals actually carried (non-null) — an unmeasured micro is omitted, never a
+   * fabricated 0. Absent when no logged meal carried any of them.
+   */
+  intakeMicros?: string[];
   burnKcal?: number;
   name?: string;
+  /** Today's sleep (就寝→起床（長さ））, when logged. One factual line. */
+  sleepToday?: string;
+  /**
+   * Recent-days SUMMARY (最近N日, excluding today): a compact, capped digest of
+   * the last few days' meals / workouts / sleep so the coach can see trends —
+   * fixing "コーチが今日(24h)しか見れない". Token-bounded (built by the client). Each
+   * line is one day; absent/empty when there's no recent logged data.
+   */
+  recentDays?: RecentDaySummary[];
   /** Grounded result of a photo the user sent THIS turn. Only set on a photo turn. */
   mealAnalysis?: ChatMealAnalysis;
+}
+
+/**
+ * A compact one-day digest for the recent-history window the coach reads. Every
+ * field is optional and already summarised/clamped by the client (no raw item
+ * lists) so the recent window can't balloon the prompt. Nothing is invented —
+ * a day with no logged data simply isn't included.
+ */
+export interface RecentDaySummary {
+  /** The day, as a friendly label (e.g. "6月20日(金)"). */
+  label: string;
+  /** Intake kcal that day, when any meal carried nutrition. */
+  intakeKcal?: number;
+  /** Number of meals logged that day. */
+  mealCount?: number;
+  /** Estimated workout burn kcal that day, when any exercise was logged. */
+  burnKcal?: number;
+  /** Number of exercises logged that day. */
+  exerciseCount?: number;
+  /** Sleep length that day (e.g. "7時間0分"), when sleep was logged. */
+  sleep?: string;
 }
 
 export interface ChatWireMessage {
@@ -274,6 +325,51 @@ export function buildLoggedWorkoutItems(
 }
 
 /**
+ * The curated set of MAJOR vitamins/minerals surfaced to the coach (拡張①). The
+ * full MICRO_DEFS set is ~18 keys; threading every one into the prompt would
+ * balloon the tokens, so we bound the coach context to this nutritionally-salient
+ * subset. Order = display order in the prompt line. Keys are MICRO_DEFS keys.
+ */
+const COACH_MICRO_KEYS: readonly string[] = [
+  "vitaminA",
+  "vitaminD",
+  "vitaminC",
+  "vitaminB12",
+  "folate",
+  "calcium",
+  "iron",
+  "potassium",
+  "magnesium",
+  "zinc",
+];
+
+/** One decimal place (matches the rest of the nutrition rounding). */
+function round1(n: number): number {
+  return Math.round(n * 10) / 10;
+}
+
+/**
+ * Build the BOUNDED, unit-tagged today's-intake micros summary for the coach
+ * (拡張①). Only the curated 主要 set (COACH_MICRO_KEYS), and only the micros the
+ * day's meals ACTUALLY carried (a finite non-negative number) — an unmeasured /
+ * absent micro is OMITTED, never a fabricated 0. Each line is "label value unit"
+ * (e.g. "ビタミンC 80mg", "鉄 6.5mg"). Returns undefined when nothing usable, so
+ * the context omits the block. Pure + bounded (≤ COACH_MICRO_KEYS.length lines).
+ */
+export function buildIntakeMicros(micros: Micros | undefined | null): string[] | undefined {
+  if (!micros) return undefined;
+  const lines: string[] = [];
+  for (const key of COACH_MICRO_KEYS) {
+    const v = micros[key];
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 0) continue; // null/absent/garbage → omit
+    const def = microDef(key);
+    if (!def) continue;
+    lines.push(`${def.label} ${round1(v)}${def.unit}`);
+  }
+  return lines.length > 0 ? lines : undefined;
+}
+
+/**
  * Build the minimal coaching context from client-side data. Pure + testable:
  * only includes fields that are actually known (no profile → no targets, no
  * meals → no intake), so the coach is never handed an invented number.
@@ -293,6 +389,10 @@ export function buildChatContext(args: {
   loggedMealItems?: LoggedMealContent[];
   /** WHAT exercises were logged today (name + set summary) — own logged data. */
   loggedWorkoutItems?: string[];
+  /** Today's sleep summary (就寝→起床（長さ）), when logged. */
+  sleepToday?: string;
+  /** Recent-days digest (最近N日, excluding today) for trend-aware coaching. */
+  recentDays?: RecentDaySummary[];
   /** User-chosen coach persona (presentation only); absent → default 健康マン. */
   coach?: ChatCoachPersona;
 }): ChatContext {
@@ -306,6 +406,8 @@ export function buildChatContext(args: {
     loggedWorkoutTime,
     loggedMealItems,
     loggedWorkoutItems,
+    sleepToday,
+    recentDays,
     coach,
   } = args;
   const ctx: ChatContext = {};
@@ -328,6 +430,11 @@ export function buildChatContext(args: {
     ctx.loggedWorkoutItems = loggedWorkoutItems;
   }
 
+  // Today's sleep + the recent-days digest — only when there's real data, so the
+  // coach never asserts a sleep length / past day that wasn't logged.
+  if (sleepToday && sleepToday.trim()) ctx.sleepToday = sleepToday.trim();
+  if (recentDays && recentDays.length > 0) ctx.recentDays = recentDays;
+
   if (profile) {
     if (profile.name && profile.name.trim()) ctx.name = profile.name.trim();
     ctx.goal = goalLabel(profile.goal);
@@ -337,6 +444,10 @@ export function buildChatContext(args: {
     if (registered) ctx.registered = registered;
   }
   if (targets) {
+    // Computed energy baseline (拡張②) so the coach can ground in the user's
+    // 体格・代謝 (BMR/TDEE), not just the goal kcal.
+    if (Number.isFinite(targets.bmr)) ctx.targetBmr = targets.bmr;
+    if (Number.isFinite(targets.tdee)) ctx.targetTdee = targets.tdee;
     ctx.targetKcal = targets.calories;
     ctx.targetProteinG = targets.proteinG;
     ctx.targetFatG = targets.fatG;
@@ -348,6 +459,13 @@ export function buildChatContext(args: {
     ctx.intakeProteinG = Math.round(intake.proteinG);
     ctx.intakeFatG = Math.round(intake.fatG);
     ctx.intakeCarbG = Math.round(intake.carbG);
+  }
+  // Today's MAJOR vitamins/minerals (拡張①) — bounded + non-null only, so the
+  // coach can ground micro advice. Independent of loggedCount: surfaced whenever
+  // the day's meals carried any of the curated micros (else omitted entirely).
+  if (intake) {
+    const intakeMicros = buildIntakeMicros(intake.micros);
+    if (intakeMicros) ctx.intakeMicros = intakeMicros;
   }
   if (typeof burnKcal === "number" && Number.isFinite(burnKcal) && burnKcal > 0) {
     ctx.burnKcal = Math.round(burnKcal);

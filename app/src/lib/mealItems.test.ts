@@ -8,7 +8,7 @@ import {
   setItemQty,
   toMealItem,
 } from "./mealItems";
-import { groundManualItem } from "./foodGrounding";
+import { groundManualItem, groundMealLogItem } from "./foodGrounding";
 import type { MealItem } from "./types";
 
 // Real MEXT per-100g rows used below (from functions/_data/nutrition-lookup.json):
@@ -168,6 +168,64 @@ describe("groundManualItem — manual add grounds against the DB like analysis",
   });
 });
 
+describe("ANTI-FABRICATION — chat→食事 estimate keeps unmeasured PFC null (not 0)", () => {
+  it("a kcal-only estimate logs PFC as null, never a fabricated 0", () => {
+    // The coach's block carried only a kcal (no macros). The grounded item must
+    // keep protein/fat/carb null so the card shows "—", not a fake 0g.
+    const item = groundMealLogItem({
+      name: "屋台のたい焼き",
+      grams: 100,
+      source: "estimate",
+      kcal: 210,
+    });
+    expect(item.sourceKind).toBe("estimate");
+    expect(item.kcal).toBe(210);
+    expect(item.proteinG).toBeNull();
+    expect(item.fatG).toBeNull();
+    expect(item.carbG).toBeNull();
+  });
+
+  it("itemsToNutrition sums PFC only over items that have them (no 0 from kcal-only)", () => {
+    // One estimate has kcal + protein; the other has kcal only. Protein total =
+    // JUST the first's protein (kcal-only item must not add a 0), and fat/carb are
+    // null (no contributing item carried them) → shown as "—".
+    const withProtein = groundMealLogItem({
+      name: "焼き菓子A",
+      grams: 100,
+      source: "estimate",
+      kcal: 200,
+      protein_g: 5,
+    });
+    const kcalOnly = groundMealLogItem({
+      name: "焼き菓子B",
+      grams: 100,
+      source: "estimate",
+      kcal: 150,
+    });
+    const n = itemsToNutrition([withProtein, kcalOnly]);
+    expect(n.calories).toBe(350);
+    expect(n.proteinG).toBe(5); // only A's protein, NOT 5 + 0
+    expect(n.fatG).toBeNull(); // neither carried fat → "—", not 0
+    expect(n.carbG).toBeNull();
+  });
+
+  it("a meal of ONLY kcal-only estimates reports PFC totals as null", () => {
+    const a = groundMealLogItem({ name: "謎A", grams: 100, source: "estimate", kcal: 120 });
+    const b = groundMealLogItem({ name: "謎B", grams: 100, source: "estimate", kcal: 80 });
+    const n = itemsToNutrition([a, b]);
+    expect(n.calories).toBe(200);
+    expect(n.proteinG).toBeNull();
+    expect(n.fatG).toBeNull();
+    expect(n.carbG).toBeNull();
+  });
+
+  it("a db meal still reports real PFC totals (the null rule never hides DB numbers)", () => {
+    const n = itemsToNutrition([dbRice(150)]);
+    expect(n.calories).toBe(234);
+    expect(n.proteinG).toBe(3.8); // 2.5 × 1.5, a real number (not null)
+  });
+});
+
 describe("presets — a preset sets the item grams", () => {
   it("ごはん presets exist and applying one sets grams (and recomputes)", () => {
     const presets = presetsForName("ごはん");
@@ -194,5 +252,189 @@ describe("recompute keeps numbers in sync without mutating the input", () => {
     const next = recomputeItem({ ...base, grams: 300 });
     expect(base.grams).toBe(150); // original untouched
     expect(next.kcal).toBe(468);
+  });
+});
+
+describe("extra nutrients (全栄養素) — recompute + sum, with honest nulls", () => {
+  /** A db item carrying extra nutrients in its per-100g basis (saturated null). */
+  function dbRiceFull(grams = 150): MealItem {
+    return toMealItem({
+      id: "rice",
+      name: "ごはん",
+      grams,
+      kcal: null,
+      proteinG: null,
+      fatG: null,
+      carbG: null,
+      sourceKind: "db",
+      source: "日本食品標準成分表（八訂）増補2023年から引用",
+      confidence: "high",
+      foodCode: "01088",
+      basisPer100g: {
+        foodCode: "01088",
+        kcal: 156,
+        proteinG: 2.5,
+        fatG: 0.3,
+        carbG: 37.1,
+        fiberG: 1.5,
+        sugarG: 38.1,
+        sodiumMg: 1,
+        saturatedFatG: null, // not in the table
+      },
+    });
+  }
+
+  it("db item scales the extra nutrients from the basis; saturated stays null", () => {
+    const base = dbRiceFull(100);
+    expect(base.fiberG).toBeCloseTo(1.5, 1);
+    expect(base.sugarG).toBeCloseTo(38.1, 1);
+    expect(base.sodiumMg).toBeCloseTo(1, 1);
+    expect(base.saturatedFatG).toBeNull();
+    const doubled = setItemGrams(base, 200);
+    expect(doubled.fiberG).toBeCloseTo(3, 1); // 1.5 × 2
+    expect(doubled.sodiumMg).toBeCloseTo(2, 1); // 1 × 2
+    expect(doubled.saturatedFatG).toBeNull(); // still no figure (never fabricated)
+  });
+
+  it("label/estimate item scales its extra anchors proportionally; missing stays null", () => {
+    const bar = toMealItem({
+      id: "bar",
+      name: "プロテインバー",
+      grams: 50,
+      kcal: 200,
+      proteinG: 20,
+      fatG: 6,
+      carbG: 20,
+      fiberG: 5,
+      sodiumMg: 150,
+      // sugar + saturated omitted → null
+      sourceKind: "label",
+      source: "ラベル値",
+      confidence: "medium",
+    });
+    expect(bar.fiberG).toBe(5);
+    expect(bar.sodiumMg).toBe(150);
+    expect(bar.sugarG).toBeNull(); // omitted → null, not 0
+    expect(bar.saturatedFatG).toBeNull();
+    const doubled = setItemGrams(bar, 100);
+    expect(doubled.fiberG).toBe(10); // 5 × 2
+    expect(doubled.sodiumMg).toBe(300); // 150 × 2
+    expect(doubled.sugarG).toBeNull(); // still null after scaling
+  });
+
+  it("itemsToNutrition sums extras only over items that carry them; null when none", () => {
+    const rice = dbRiceFull(100); // fiber 1.5, sodium 1, no saturated
+    const bar = toMealItem({
+      id: "bar",
+      name: "プロテインバー",
+      grams: 50,
+      kcal: 200,
+      proteinG: 20,
+      fatG: 6,
+      carbG: 20,
+      fiberG: 5,
+      saturatedFatG: 3,
+      sourceKind: "label",
+      source: "ラベル値",
+      confidence: "medium",
+    });
+    const total = itemsToNutrition([rice, bar]);
+    expect(total.fiberG).toBeCloseTo(6.5, 1); // 1.5 + 5
+    expect(total.saturatedFatG).toBe(3); // only the bar had it
+  });
+
+  it("itemsToNutrition: a meal with NO extra-nutrient figures → those totals null", () => {
+    const estimateOnly = estimateKaraage(100); // no extras supplied
+    const total = itemsToNutrition([estimateOnly]);
+    expect(total.calories).toBe(290);
+    expect(total.fiberG).toBeNull();
+    expect(total.sugarG).toBeNull();
+    expect(total.sodiumMg).toBeNull();
+    expect(total.saturatedFatG).toBeNull();
+  });
+});
+
+describe("vitamins/minerals (拡張①) — recompute + sum, with honest nulls", () => {
+  /** A db item whose per-100g basis carries a micros map (iron measured, B12 null). */
+  function dbWithMicros(grams = 100): MealItem {
+    return toMealItem({
+      id: "veg",
+      name: "ほうれんそう",
+      grams,
+      kcal: null,
+      proteinG: null,
+      fatG: null,
+      carbG: null,
+      sourceKind: "db",
+      source: "日本食品標準成分表（八訂）増補2023年から引用",
+      confidence: "high",
+      foodCode: "06267",
+      basisPer100g: {
+        foodCode: "06267",
+        kcal: 18,
+        proteinG: 2.2,
+        fatG: 0.4,
+        carbG: 3.1,
+        micros: { iron: 2.0, vitaminC: 35, vitaminB12: null },
+      },
+    });
+  }
+
+  it("db item scales the micros from the basis; an unmeasured micro stays null", () => {
+    const base = dbWithMicros(100);
+    expect(base.micros?.iron).toBeCloseTo(2.0, 1);
+    expect(base.micros?.vitaminC).toBeCloseTo(35, 1);
+    expect(base.micros?.vitaminB12).toBeNull(); // unmeasured → null, never 0
+    const doubled = setItemGrams(base, 200);
+    expect(doubled.micros?.iron).toBeCloseTo(4.0, 1); // 2 × 2
+    expect(doubled.micros?.vitaminC).toBeCloseTo(70, 1);
+    expect(doubled.micros?.vitaminB12).toBeNull();
+  });
+
+  it("label/estimate item scales its anchor micros proportionally", () => {
+    const supp = toMealItem({
+      id: "supp",
+      name: "鉄サプリ",
+      grams: 1,
+      kcal: 0,
+      proteinG: 0,
+      fatG: 0,
+      carbG: 0,
+      micros: { iron: 10 },
+      sourceKind: "label",
+      source: "ラベル値",
+      confidence: "medium",
+    });
+    expect(supp.micros?.iron).toBe(10);
+    const doubled = setItemGrams(supp, 2);
+    expect(doubled.micros?.iron).toBeCloseTo(20, 1); // 10 × 2 (grams/baseGrams)
+  });
+
+  it("itemsToNutrition sums micros only over items that carry them; null when none", () => {
+    const veg = dbWithMicros(100); // iron 2, vitaminC 35
+    const supp = toMealItem({
+      id: "supp",
+      name: "鉄サプリ",
+      grams: 1,
+      kcal: 0,
+      proteinG: 0,
+      fatG: 0,
+      carbG: 0,
+      micros: { iron: 10 },
+      sourceKind: "label",
+      source: "ラベル値",
+      confidence: "medium",
+    });
+    const total = itemsToNutrition([veg, supp]);
+    expect(total.micros?.iron).toBeCloseTo(12, 1); // 2 + 10
+    expect(total.micros?.vitaminC).toBeCloseTo(35, 1); // only veg had it
+    // a micro NO item carried stays null (not a fabricated 0).
+    expect(total.micros?.calcium).toBeNull();
+  });
+
+  it("a meal with NO micros → meal micros undefined (panel hidden)", () => {
+    const estimateOnly = estimateKaraage(100);
+    const total = itemsToNutrition([estimateOnly]);
+    expect(total.micros).toBeUndefined();
   });
 });

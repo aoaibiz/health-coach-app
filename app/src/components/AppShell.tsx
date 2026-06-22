@@ -47,6 +47,12 @@ const SUB_PAGES = [
     match: (p: string) => p.startsWith("/cardio"),
   },
   {
+    href: "/sleep",
+    label: "睡眠",
+    Icon: MoonIcon,
+    match: (p: string) => p.startsWith("/sleep"),
+  },
+  {
     href: "/calendar",
     label: "カレンダー",
     Icon: CalendarIcon,

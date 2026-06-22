@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildChatContext,
+  buildIntakeMicros,
   buildLoggedMealItems,
   buildLoggedWorkoutItems,
   buildRegisteredProfile,
@@ -33,7 +34,18 @@ const TARGETS: NutritionTargets = {
 };
 
 function intake(over: Partial<IntakeTotals> = {}): IntakeTotals {
-  return { calories: 0, proteinG: 0, fatG: 0, carbG: 0, loggedCount: 0, ...over };
+  return {
+    calories: 0,
+    proteinG: 0,
+    fatG: 0,
+    carbG: 0,
+    fiberG: null,
+    sugarG: null,
+    sodiumMg: null,
+    saturatedFatG: null,
+    loggedCount: 0,
+    ...over,
+  };
 }
 
 describe("buildChatContext — only includes known data (no fabrication)", () => {
@@ -57,6 +69,9 @@ describe("buildChatContext — only includes known data (no fabrication)", () =>
         activityLabel: "中程度",
         goalLabel: "減量",
       },
+      // Computed energy baseline (拡張②: 体格・代謝を考慮) travels with the context.
+      targetBmr: 1600,
+      targetTdee: 2480,
       targetKcal: 1984,
       targetProteinG: 140,
       targetFatG: 55,
@@ -86,6 +101,31 @@ describe("buildChatContext — only includes known data (no fabrication)", () =>
     expect(ctx).toEqual({});
   });
 
+  it("carries today's sleep + the recent-days digest when provided (Features ① + ②)", () => {
+    const ctx = buildChatContext({
+      profile: null,
+      targets: null,
+      intake: null,
+      sleepToday: "23:00→07:00（8時間0分）",
+      recentDays: [{ label: "6月20日(金)", intakeKcal: 1800, mealCount: 3, sleep: "7時間0分" }],
+    });
+    expect(ctx.sleepToday).toBe("23:00→07:00（8時間0分）");
+    expect(ctx.recentDays).toHaveLength(1);
+    expect(ctx.recentDays![0].label).toBe("6月20日(金)");
+  });
+
+  it("omits sleep/recentDays when empty (no fabrication)", () => {
+    const ctx = buildChatContext({
+      profile: null,
+      targets: null,
+      intake: null,
+      sleepToday: "",
+      recentDays: [],
+    });
+    expect(ctx.sleepToday).toBeUndefined();
+    expect(ctx.recentDays).toBeUndefined();
+  });
+
   it("carries the user's registered身体情報 (incl. targetWeight/bodyFat) when set", () => {
     const ctx = buildChatContext({
       profile: { ...PROFILE, targetWeightKg: 65, bodyFatPct: 18 },
@@ -103,6 +143,54 @@ describe("buildChatContext — only includes known data (no fabrication)", () =>
       goalLabel: "減量",
       bodyFatPct: 18,
     });
+  });
+});
+
+describe("buildIntakeMicros — bounded major vitamins/minerals, non-null only (拡張①)", () => {
+  it("returns undefined when there are no micros at all", () => {
+    expect(buildIntakeMicros(undefined)).toBeUndefined();
+    expect(buildIntakeMicros(null)).toBeUndefined();
+    expect(buildIntakeMicros({})).toBeUndefined();
+  });
+
+  it("renders only the curated set's NON-null micros with label + value + unit", () => {
+    const lines = buildIntakeMicros({
+      vitaminC: 80,
+      iron: 6.5,
+      calcium: null, // unmeasured → omitted, never a fabricated 0
+      potassium: 0, // a real measured 0 IS shown (it's not null/absent)
+      // a micro outside the curated coach set is NOT surfaced even if present:
+      copper: 0.4,
+    });
+    // Order follows the curated COACH_MICRO_KEYS order (…calcium, iron, potassium…).
+    expect(lines).toEqual(["ビタミンC 80mg", "鉄 6.5mg", "カリウム 0mg"]);
+    // The non-curated key (copper) must not appear.
+    expect(lines!.some((l) => l.includes("銅"))).toBe(false);
+    // The unmeasured (null) curated key (calcium) must not appear (no 0 invented).
+    expect(lines!.some((l) => l.includes("カルシウム"))).toBe(false);
+  });
+
+  it("drops garbage values (negative / NaN) — never surfaced", () => {
+    const lines = buildIntakeMicros({ vitaminC: -5, iron: Number.NaN, zinc: 8 });
+    expect(lines).toEqual(["亜鉛 8mg"]);
+  });
+
+  it("buildChatContext attaches intakeMicros when the day's meals carry them", () => {
+    const ctx = buildChatContext({
+      profile: null,
+      targets: null,
+      intake: intake({ loggedCount: 1, micros: { vitaminC: 80, iron: 6.5 } }),
+    });
+    expect(ctx.intakeMicros).toEqual(["ビタミンC 80mg", "鉄 6.5mg"]);
+  });
+
+  it("buildChatContext omits intakeMicros when no micro was logged (no fabricated 0)", () => {
+    const ctx = buildChatContext({
+      profile: null,
+      targets: null,
+      intake: intake({ loggedCount: 1 }), // no micros
+    });
+    expect(ctx.intakeMicros).toBeUndefined();
   });
 });
 

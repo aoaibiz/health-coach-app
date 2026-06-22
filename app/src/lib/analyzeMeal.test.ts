@@ -276,6 +276,101 @@ describe("toMealNutrition", () => {
     expect(item.baseKcal).toBe(290);
   });
 
+  it("maps the extra nutrients (fiber/sugar/sodium) into items + totals (db basis)", () => {
+    const n = toMealNutrition(
+      apiResponse({
+        items: [
+          {
+            ...apiResponse().items[0],
+            name: "ごはん",
+            grams: 100,
+            kcal: 156,
+            protein_g: 2.5,
+            fat_g: 0.3,
+            carb_g: 37.1,
+            fiber_g: 1.5,
+            sugar_g: 38.1,
+            sodium_mg: 1,
+            saturated_fat_g: null, // not in the bundled table
+            foodCode: "01088",
+            basisPer100g: {
+              kcal: 156,
+              protein_g: 2.5,
+              fat_g: 0.3,
+              carb_g: 37.1,
+              fiber_g: 1.5,
+              sugar_g: 38.1,
+              sodium_mg: 1,
+              saturated_fat_g: null,
+            },
+          },
+        ],
+        totals: {
+          kcal: 156,
+          protein_g: 2.5,
+          fat_g: 0.3,
+          carb_g: 37.1,
+          fiber_g: 1.5,
+          sugar_g: 38.1,
+          sodium_mg: 1,
+          saturated_fat_g: null,
+        },
+      }),
+    );
+    expect(n).not.toBeNull();
+    const item = n!.items![0];
+    expect(item.fiberG).toBeCloseTo(1.5, 1);
+    expect(item.sugarG).toBeCloseTo(38.1, 1);
+    expect(item.sodiumMg).toBeCloseTo(1, 1);
+    expect(item.saturatedFatG).toBeNull(); // honest null, never a fabricated 0
+    // The per-100g basis carries the extras for exact recompute on edit.
+    expect(item.basisPer100g?.fiberG).toBe(1.5);
+    // Totals (derived from the single item) carry the extras too.
+    expect(n!.fiberG).toBeCloseTo(1.5, 1);
+    expect(n!.saturatedFatG).toBeNull();
+  });
+
+  it("an estimate item with NO extra nutrients keeps them null in the meal total", () => {
+    const n = toMealNutrition(
+      apiResponse({
+        items: [
+          {
+            name: "謎の総菜",
+            grams: 100,
+            kcal: 250,
+            protein_g: 10,
+            fat_g: 12,
+            carb_g: 22,
+            source: "推定値",
+            sourceKind: "estimate",
+            sourceLabel: "推定値",
+            estimated: true,
+            confidence: "low",
+            matched: false,
+          },
+        ],
+        totals: {
+          kcal: 250,
+          protein_g: 10,
+          fat_g: 12,
+          carb_g: 22,
+          fiber_g: null,
+          sugar_g: null,
+          sodium_mg: null,
+          saturated_fat_g: null,
+        },
+        matchedCount: 0,
+        numberedCount: 1,
+        totalsIncludeEstimate: true,
+      }),
+    );
+    expect(n!.calories).toBe(250);
+    expect(n!.fiberG).toBeNull();
+    expect(n!.sugarG).toBeNull();
+    expect(n!.sodiumMg).toBeNull();
+    expect(n!.saturatedFatG).toBeNull();
+  });
+
   it("summary confidence is the LOWEST across numbered items (honest)", () => {
     const n = toMealNutrition(
       apiResponse({

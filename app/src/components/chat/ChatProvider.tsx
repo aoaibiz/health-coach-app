@@ -36,6 +36,8 @@ import {
   saveMeals,
   saveWorkouts,
 } from "@/lib/storage";
+import { loadSleepLogs, saveSleepLogs } from "@/lib/sleepLog";
+import { buildRecentDays, todaySleepSummary } from "@/lib/chatHistoryContext";
 import { calcTargets } from "@/lib/nutrition";
 import { sumIntake } from "@/lib/intake";
 import { workoutBurn } from "@/lib/burn";
@@ -52,7 +54,19 @@ import {
   NON_FOOD_ANALYSIS,
 } from "@/lib/chatMealLog";
 import { estimateLoggedMeal } from "@/lib/chatMealEstimate";
+import {
+  resolveSameAsYesterday,
+  sameAsYesterdayConfirmation,
+} from "@/lib/sameAsYesterday";
+import {
+  ambiguousDateNote,
+  backdatedNote,
+  resolveRelativeDateKeyForKind,
+} from "@/lib/relativeDate";
 import { applyWorkoutLog, lastLoggedWorkoutIds } from "@/lib/chatWorkoutLog";
+import { parseSleepReply } from "@/lib/sleepLogProtocol";
+import { applySleepLog } from "@/lib/chatSleepLog";
+import { reconcileLogClaim } from "@/lib/logClaim";
 import type { Profile } from "@/lib/types";
 
 /**
@@ -63,8 +77,11 @@ import type { Profile } from "@/lib/types";
 function readTodayContext() {
   const profile = loadProfile();
   const today = toDateKey();
-  const dayMeals = loadMeals().filter((m) => m.date === today);
-  const workout = loadWorkouts()[today];
+  const allMeals = loadMeals();
+  const allWorkouts = loadWorkouts();
+  const allSleep = loadSleepLogs();
+  const dayMeals = allMeals.filter((m) => m.date === today);
+  const workout = allWorkouts[today];
   const exercises = workout?.exercises ?? [];
 
   const targets = profile ? calcTargets(profile) : null;
@@ -98,6 +115,18 @@ function readTodayContext() {
   const loggedMealItems = buildLoggedMealItems(dayMeals);
   const loggedWorkoutItems = buildLoggedWorkoutItems(exercises, makeId);
 
+  // Feature ① + ②: today's sleep + a compact recent-days digest (摂取/運動/睡眠)
+  // so the coach sees sleep AND trends (not just today's 24h). Built from the
+  // same local stores; token-bounded; nothing invented (empty days are skipped).
+  const sleepToday = todaySleepSummary(allSleep, today);
+  const recentDays = buildRecentDays({
+    todayKey: today,
+    meals: allMeals,
+    workouts: allWorkouts,
+    sleep: allSleep,
+    weightKg: profile?.weightKg ?? null,
+  });
+
   // The user-chosen coach persona (presentation only) rides along on the context
   // so the prompt builds the chosen voice/name; the expertise + guardrails stay
   // constant. Absent settings → undefined → the default 健康マン persona.
@@ -115,6 +144,8 @@ function readTodayContext() {
       loggedWorkoutTime,
       loggedMealItems,
       loggedWorkoutItems,
+      sleepToday,
+      recentDays,
       coach,
     }),
   };
@@ -318,12 +349,50 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // a setMessages updater.
         const withUser = appendMessage(userMsg);
 
+        // ---- 1b. "昨日と同じ量" shortcut (deterministic, no LLM round-trip) ----
+        // When the user says "log the same as yesterday" for a meal slot, the coach
+        // (which only sees TODAY's data) used to re-ask for grams and never record it.
+        // Instead, reuse YESTERDAY's actual logged meal for that slot: copy its items
+        // + grams + kcal/PFC verbatim and log it for today, WITHOUT re-asking. This is
+        // a TEXT-only intent (no photo); if yesterday genuinely has no record for the
+        // slot, resolveSameAsYesterday returns null → we fall through to the normal
+        // coach path (which then asks). Nothing is fabricated — the numbers are
+        // yesterday's own grounded record.
+        if (!hasPhotos) {
+          const reuse = resolveSameAsYesterday(trimmed, loadMeals());
+          if (reuse) {
+            saveMeals([...loadMeals(), reuse.meal]);
+            const itemCount = reuse.meal.nutrition?.items?.length ?? 0;
+            appendMessage({
+              id: makeId(),
+              role: "assistant",
+              content: sameAsYesterdayConfirmation(reuse),
+              createdAt: new Date().toISOString(),
+              loggedMeal: { mealId: reuse.meal.id, itemCount },
+            });
+            return; // logged directly — skip the LLM call entirely
+          }
+        }
+
         // Snapshot the correction targets NOW (at send time), from the array that
         // existed when this user turn was added. This binds any correction to the
         // meal/workout that existed when the user sent it — so an overlapping
         // new-meal send can't steal the correction target by the time the reply lands.
         const correctMealId = lastLoggedMealId(withUser);
         const correctWorkoutIds = lastLoggedWorkoutIds(withUser);
+
+        // Feature ② (Major-2 fix): a relative-date phrase ("これ昨日の分で記入して")
+        // targets a PAST day for a NEW log. Resolved PER BLOCK KIND from the user's
+        // own words — so "昨日の夕食と今日の筋トレ" backdates the MEAL to yesterday
+        // WITHOUT dragging the workout there too (and vice-versa). Each kind's date
+        // is decided from its own phrase; null → today (safe default). When the day
+        // is genuinely ambiguous for a kind (conflicting day words we can't safely
+        // attribute), `ambiguous` is true → we DON'T auto-save that block; we ask
+        // the user to confirm instead (anti-mis-record). A "correct" keeps its
+        // original entry's date regardless (applyMealLog ignores `date` on update).
+        const mealDate = resolveRelativeDateKeyForKind(trimmed, "meal");
+        const workoutDate = resolveRelativeDateKeyForKind(trimmed, "workout");
+        const sleepDate = resolveRelativeDateKeyForKind(trimmed, "sleep");
 
         const { context } = readTodayContext();
         // Attach the grounded photo analysis (presentation context for the coach)
@@ -337,7 +406,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // driven) block. Strip the meal block first, then scan its leftover prose
         // for a workout block, so neither sentinel can leak into the bubble.
         const { display: afterMeal, payload: mealPayload } = parseCoachReply(rawReply);
-        const { display, payload: workoutPayload } = parseWorkoutReply(afterMeal);
+        const { display: afterWorkout, payload: workoutPayload } = parseWorkoutReply(afterMeal);
+        // Strip the SLEEP block last so its sentinel can't leak into the bubble either.
+        const { display, payload: sleepPayload } = parseSleepReply(afterWorkout);
 
         // ---- 3. Auto-log (the critical part): re-ground + write -------------
         // The LOGGED numbers come from the grounded pipelines (meal: foodGrounding;
@@ -353,10 +424,26 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // reply time) means a correction binds to the meal/workout that existed when
         // the user sent it, so an overlapping new-meal send can't steal the target.
         let loggedMeal: ChatMessage["loggedMeal"];
-        if (mealPayload) {
+        // Track when a block was held back because its day was ambiguous, so the
+        // bubble can ask the user to confirm instead of silently mis-recording.
+        let ambiguousDate = false;
+        // The distinct PAST days blocks actually landed on this turn, so the bubble
+        // notes each backdate honestly (per block — a meal on 昨日 + a workout on
+        // 今日 only notes the 昨日 one). Today is never added (no note needed).
+        const backdatedDates = new Set<string>();
+        // A backdated NEW meal targets the resolved past day; a correction keeps
+        // its original date (applyMealLog ignores `date` on the update path).
+        const mealIsNew = (mealPayload?.mode ?? "new") === "new";
+        const mealTargetDate = mealIsNew ? (mealDate.dateKey ?? undefined) : undefined;
+        // Hold back an ambiguous-day NEW meal (don't guess the wrong day). A
+        // correction is exempt (it updates a known existing entry's own date).
+        if (mealPayload && mealIsNew && mealDate.ambiguous) {
+          ambiguousDate = true;
+        } else if (mealPayload) {
           const applied = applyMealLog(mealPayload, {
             meals: loadMeals(),
             correctId: correctMealId,
+            date: mealTargetDate,
             photoId,
             // CHANGE 3: tighten label/estimate numbers to the grounded analysis.
             analysis: mealAnalysis,
@@ -370,14 +457,20 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             const enriched = await estimateLoggedMeal(applied.meals, applied.mealId);
             saveMeals(enriched);
             loggedMeal = { mealId: applied.mealId, itemCount: applied.itemCount };
+            if (mealTargetDate) backdatedDates.add(mealTargetDate);
           }
         }
 
         let loggedWorkout: ChatMessage["loggedWorkout"];
-        if (workoutPayload) {
+        const workoutIsNew = (workoutPayload?.mode ?? "new") === "new";
+        const workoutTargetDate = workoutIsNew ? (workoutDate.dateKey ?? undefined) : undefined;
+        if (workoutPayload && workoutIsNew && workoutDate.ambiguous) {
+          ambiguousDate = true; // hold back the ambiguous-day NEW workout; ask to confirm
+        } else if (workoutPayload) {
           const applied = applyWorkoutLog(workoutPayload, {
             workouts: loadWorkouts(),
             correctIds: correctWorkoutIds,
+            date: workoutTargetDate,
           });
           if (applied) {
             saveWorkouts(applied.workouts);
@@ -386,15 +479,59 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               date: applied.date,
               exerciseCount: applied.exerciseCount,
             };
+            if (workoutTargetDate) backdatedDates.add(workoutTargetDate);
           }
         }
 
+        // ---- 3c. Sleep auto-log (chat→睡眠, 拡張②) ---------------------------
+        // One doc/day: a confirmed 就寝/起床 pair upserts the day's sleep record.
+        // The LENGTH is derived by the store (overnight-aware), never the model.
+        // A relative-date phrase ("昨日の分") targets that past day (resolved from
+        // the sleep phrase only); else today. An ambiguous day holds the block back.
+        let loggedSleep = false;
+        if (sleepPayload && sleepDate.ambiguous) {
+          ambiguousDate = true; // hold back the ambiguous-day sleep; ask to confirm
+        } else if (sleepPayload) {
+          const applied = applySleepLog(sleepPayload, {
+            sleep: loadSleepLogs(),
+            date: sleepDate.dateKey ?? undefined,
+          });
+          saveSleepLogs(applied.sleep);
+          loggedSleep = true;
+          if (sleepDate.dateKey) backdatedDates.add(sleepDate.dateKey);
+        }
+
+        // RECORDING-RELIABILITY GUARD (the "if it says 記録しました, it IS recorded"
+        // guarantee). The coach may write a completed-save claim in prose
+        // ("登録しておきました") but emit NO block — or a malformed one that grounds to
+        // nothing — so nothing was actually saved. `recorded` is the GROUND TRUTH:
+        // a meal OR workout record was really produced this turn. When the prose
+        // claims a save but `recorded` is false, reconcileLogClaim appends an honest
+        // notice so the user is never falsely told it was logged; the chip below is
+        // ALSO gated on `recorded`, so the chip can only appear when a record exists.
+        // We never fabricate a record to satisfy the claim (no calorie invention) —
+        // we make the message honest instead.
+        const recorded = Boolean(loggedMeal) || Boolean(loggedWorkout) || loggedSleep;
+        const baseProse = display || rawReply;
+        let honestProse = reconcileLogClaim(baseProse, recorded);
+        // Feature ②: when a record actually landed on a PAST day, append an honest
+        // note per backdated day so the user can see it wasn't logged to today. With
+        // per-block dates a meal on 昨日 + a workout on 今日 notes only the 昨日 one.
+        for (const dateKey of backdatedDates) {
+          const note = backdatedNote(dateKey);
+          if (note) honestProse = `${honestProse}\n\n${note}`;
+        }
+        // Major-2 fix: a block was held back because its day was ambiguous — tell the
+        // user it wasn't saved and how to disambiguate, instead of mis-recording it.
+        if (ambiguousDate) {
+          honestProse = `${honestProse}\n\n${ambiguousDateNote()}`;
+        }
         const assistantMsg: ChatMessage = {
           id: makeId(),
           role: "assistant",
-          // Always the stripped prose — raw JSON never reaches the bubble. Fall
-          // back to the raw reply only if stripping somehow emptied it.
-          content: display || rawReply,
+          // Always the stripped + reconciled prose — raw JSON never reaches the
+          // bubble, and a false "recorded" claim is corrected to be honest.
+          content: honestProse,
           createdAt: new Date().toISOString(),
           ...(loggedMeal ? { loggedMeal } : {}),
           ...(loggedWorkout ? { loggedWorkout } : {}),

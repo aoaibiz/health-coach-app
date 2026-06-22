@@ -168,6 +168,24 @@ describe("groundMealLogItem — 0/missing grams default to a portion (a DB food 
     expect(item.grams).toBe(200); // NOT overridden to 100
     expect(item.kcal).toBe(252); // 126/100g × 200g
   });
+
+  // ── CALORIE-ACCURACY HONESTY (Complaint 2): a db food whose PORTION was a silent
+  //    default is no longer presented as a fully-confirmed (high-confidence) value.
+  //    The kcal is still EXACT from the DB basis (honest number), but the confidence
+  //    drops to "medium" so the meal summary reflects the GUESSED portion — instead
+  //    of looking "適当に入れた" (a confirmed figure built on a hidden assumption). ──
+  it("a portion-DEFAULTED db food is confidence 'medium' (honest about the guessed portion)", () => {
+    const item = groundMealLogItem({ name: "さつまいも", grams: 0, source: "db" });
+    expect(item.grams).toBe(100); // defaulted portion
+    expect(item.kcal).toBe(126); // still the EXACT DB number (not arbitrary)
+    expect(item.sourceKind).toBe("db"); // still 公式DB — the basis really is the DB's
+    expect(item.confidence).toBe("medium"); // …but flagged as a portion estimate
+  });
+
+  it("a db food with a STATED portion stays confidence 'high' (regression guard)", () => {
+    const item = groundMealLogItem({ name: "さつまいも", grams: 200, source: "db" });
+    expect(item.confidence).toBe("high"); // a real stated portion → fully confirmed
+  });
 });
 
 // ── FULL CHAIN: parse → ground → log. The end-to-end proof of the invariant —

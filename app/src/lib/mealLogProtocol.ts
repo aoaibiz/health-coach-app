@@ -23,7 +23,8 @@
 // PURE + framework-free (no DOM, no network) so the parse/strip is unit-tested
 // in isolation and reused verbatim by the chat client.
 
-import type { MealType, NutritionSourceKind } from "./types";
+import type { MealType, Micros, NutritionSourceKind } from "./types";
+import { cleanMicros } from "../../functions/_lib/micros";
 
 /** The sentinel that fences the structured block. Chosen so it never appears in
  *  natural Japanese prose (guillemets + an uppercase tag). The model is told to
@@ -47,6 +48,13 @@ export interface MealLogItemPayload {
   protein_g?: number;
   fat_g?: number;
   carb_g?: number;
+  /** Extra-nutrient candidate anchors (label/estimate only; ignored for db). */
+  fiber_g?: number;
+  sugar_g?: number;
+  sodium_mg?: number;
+  saturated_fat_g?: number;
+  /** Vitamin/mineral candidate anchors (拡張①; label/estimate only, ignored for db). */
+  micros?: Micros;
 }
 
 /**
@@ -114,6 +122,22 @@ function toItem(raw: unknown): MealLogItemPayload | null {
   if (protein_g !== undefined) item.protein_g = protein_g;
   if (fat_g !== undefined) item.fat_g = fat_g;
   if (carb_g !== undefined) item.carb_g = carb_g;
+  // Extra-nutrient candidate anchors (label/estimate only; grounding ignores for db).
+  const fiber_g = num(r.fiber_g);
+  const sugar_g = num(r.sugar_g);
+  const sodium_mg = num(r.sodium_mg);
+  const saturated_fat_g = num(r.saturated_fat_g);
+  if (fiber_g !== undefined) item.fiber_g = fiber_g;
+  if (sugar_g !== undefined) item.sugar_g = sugar_g;
+  if (sodium_mg !== undefined) item.sodium_mg = sodium_mg;
+  if (saturated_fat_g !== undefined) item.saturated_fat_g = saturated_fat_g;
+  // Vitamin/mineral candidate anchors (拡張①). Sanitised per-key with a generous
+  // physical ceiling so a hallucinated micro is dropped to null (not the item).
+  const gCeil = Math.max(grams, 1);
+  const micros = cleanMicros(r.micros, (unit) =>
+    unit === "mg" ? gCeil * 1000 : gCeil * 1_000_000,
+  );
+  if (micros) item.micros = micros;
   return item;
 }
 

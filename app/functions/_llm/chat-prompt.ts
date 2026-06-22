@@ -38,6 +38,11 @@ export const MEAL_LOG_CLOSE = "«/MEAL_LOG»";
 export const WORKOUT_LOG_OPEN = "«WORKOUT_LOG»";
 export const WORKOUT_LOG_CLOSE = "«/WORKOUT_LOG»";
 
+/** Sentinel that fences the structured SLEEP auto-log block (mirrors
+ *  src/lib/sleepLogProtocol.ts — chat→睡眠, text-driven). */
+export const SLEEP_LOG_OPEN = "«SLEEP_LOG»";
+export const SLEEP_LOG_CLOSE = "«/SLEEP_LOG»";
+
 /**
  * One grounded line item from the photo analysis (the EXISTING /api/analyze-meal
  * pipeline), handed to the chat so the coach can present it and rally. These are
@@ -175,6 +180,23 @@ export interface RegisteredProfile {
   bodyFatPct?: number;
 }
 
+/**
+ * A compact one-day digest for the recent-history window (最近N日) the coach reads.
+ * Mirrors the client's RecentDaySummary (src/lib/chat.ts). Every field optional +
+ * already summarised/clamped by the client — no raw item lists reach the prompt,
+ * so the window can't balloon, and a day with nothing logged is simply omitted.
+ */
+export interface RecentDaySummary {
+  /** Friendly day label (e.g. "6月20日(金)"). */
+  label: string;
+  intakeKcal?: number;
+  mealCount?: number;
+  burnKcal?: number;
+  exerciseCount?: number;
+  /** Sleep length (e.g. "7時間0分") when logged that day. */
+  sleep?: string;
+}
+
 export interface ChatContext {
   /**
    * The user-chosen coach persona (presentation only — name/gender/style). When
@@ -226,6 +248,10 @@ export interface ChatContext {
   loggedWorkoutItems?: string[];
   /** Goal label, e.g. "減量" / "増量" / "維持". */
   goal?: string;
+  /** Basal metabolic rate (kcal), computed from the profile (拡張②: 体格考慮). */
+  targetBmr?: number;
+  /** Total daily energy expenditure (kcal), computed from the profile (拡張②). */
+  targetTdee?: number;
   /** Target intake calories for the goal. */
   targetKcal?: number;
   targetProteinG?: number;
@@ -236,10 +262,30 @@ export interface ChatContext {
   intakeProteinG?: number;
   intakeFatG?: number;
   intakeCarbG?: number;
+  /**
+   * Today's intake of the MAJOR vitamins/minerals (拡張①), as compact pre-formatted
+   * "label value unit" lines (e.g. "ビタミンC 80mg"). BOUNDED by the client to a
+   * curated 主要 set, and only the micros today's meals actually carried (non-null)
+   * — an unmeasured micro is absent, never a fabricated 0. Absent when none.
+   */
+  intakeMicros?: string[];
   /** Today's estimated workout burn (kcal). */
   burnKcal?: number;
   /** Display name, if the user set one. */
   name?: string;
+  /**
+   * Today's sleep, summarised by the client as one factual line (就寝→起床（長さ）),
+   * when the user logged it. Absent when no sleep was logged (the coach must not
+   * invent a sleep length).
+   */
+  sleepToday?: string;
+  /**
+   * A compact digest of the LAST FEW DAYS (excluding today) — meals/workouts/sleep
+   * per day, already summarised + capped by the client. Lets the coach see trends
+   * instead of only today's 24h. Absent/empty when there's no recent logged data;
+   * the coach must not invent a past day's numbers.
+   */
+  recentDays?: RecentDaySummary[];
   /**
    * Grounded result of analysing a photo the user sent THIS turn (chat→食事). When
    * present, the coach presents the identified items and rallies to confirm them.
@@ -408,6 +454,13 @@ export function formatChatContext(ctx: ChatContext | undefined): string | null {
 
   if (ctx.goal && ctx.goal.trim()) lines.push(`・目標: ${ctx.goal.trim()}`);
 
+  // Computed energy baseline (拡張②): BMR/TDEE from the profile, so the coach can
+  // reason about the user's 体格・代謝 (e.g. how big a deficit/surplus the target is).
+  const energy: string[] = [];
+  if (typeof ctx.targetBmr === "number") energy.push(`基礎代謝(BMR) ${fmtKcal(ctx.targetBmr)}`);
+  if (typeof ctx.targetTdee === "number") energy.push(`総消費(TDEE) ${fmtKcal(ctx.targetTdee)}`);
+  if (energy.length > 0) lines.push(`・推定エネルギー: ${energy.join(" / ")}`);
+
   if (typeof ctx.targetKcal === "number") {
     const pfc: string[] = [];
     if (typeof ctx.targetProteinG === "number") pfc.push(`P ${fmtG(ctx.targetProteinG)}`);
@@ -425,6 +478,13 @@ export function formatChatContext(ctx: ChatContext | undefined): string | null {
     const pfcStr = pfc.length ? `（${pfc.join(" / ")}）` : "";
     lines.push(`・今日の摂取（記録済み）: ${fmtKcal(ctx.intakeKcal)}${pfcStr}`);
   }
+
+  // Today's MAJOR vitamins/minerals (拡張①). The client already bounded the set +
+  // formatted each as "label value unit" and dropped null/unmeasured ones, so we
+  // just join them. Only emitted when at least one micro was actually logged today
+  // — an absent micro is never shown as 0 (anti-fabrication).
+  const microStr = formatIntakeMicros(ctx.intakeMicros);
+  if (microStr) lines.push(`・今日のビタミン・ミネラル（記録分）: ${microStr}`);
 
   if (typeof ctx.burnKcal === "number") {
     lines.push(`・今日の運動による推定消費: ${fmtKcal(ctx.burnKcal)}`);
@@ -454,6 +514,44 @@ export function formatChatContext(ctx: ChatContext | undefined): string | null {
   const workoutContent = formatLoggedWorkoutItems(ctx.loggedWorkoutItems);
   if (workoutContent) lines.push(`・今日の運動内容: ${workoutContent}`);
 
+  // Today's sleep (when logged) + the recent-days digest — factual, only what was
+  // actually recorded, so the coach can coach on sleep + trends without inventing.
+  if (ctx.sleepToday && ctx.sleepToday.trim()) {
+    lines.push(`・今日の睡眠: ${ctx.sleepToday.trim()}`);
+  }
+  const recent = formatRecentDays(ctx.recentDays);
+  if (recent) lines.push(`・最近の記録（直近の数日・参考）:\n${recent}`);
+
+  return lines.length > 0 ? lines.join("\n") : null;
+}
+
+/**
+ * Render the recent-days digest into compact per-day lines, e.g.:
+ *   "  6月20日(金): 摂取1800kcal(3食) / 運動250kcal(2種目) / 睡眠 7時間0分".
+ * Only the fields actually present on each day are emitted; a day with no usable
+ * field is skipped. Returns null when nothing renders (the prompt omits the line).
+ * Numbers come straight from the client digest — never invented here.
+ */
+export function formatRecentDays(days: RecentDaySummary[] | undefined): string | null {
+  if (!Array.isArray(days) || days.length === 0) return null;
+  const lines: string[] = [];
+  for (const d of days) {
+    if (!d || typeof d !== "object") continue;
+    const label = typeof d.label === "string" ? d.label.trim() : "";
+    if (!label) continue;
+    const parts: string[] = [];
+    if (typeof d.intakeKcal === "number") {
+      const meals = typeof d.mealCount === "number" ? `(${Math.round(d.mealCount)}食)` : "";
+      parts.push(`摂取${fmtKcal(d.intakeKcal)}${meals}`);
+    }
+    if (typeof d.burnKcal === "number") {
+      const ex = typeof d.exerciseCount === "number" ? `(${Math.round(d.exerciseCount)}種目)` : "";
+      parts.push(`運動${fmtKcal(d.burnKcal)}${ex}`);
+    }
+    if (typeof d.sleep === "string" && d.sleep.trim()) parts.push(`睡眠 ${d.sleep.trim()}`);
+    if (parts.length === 0) continue;
+    lines.push(`  ${label}: ${parts.join(" / ")}`);
+  }
   return lines.length > 0 ? lines.join("\n") : null;
 }
 
@@ -490,6 +588,21 @@ export function formatLoggedMealItems(
  * the line — never an invented exercise).
  */
 export function formatLoggedWorkoutItems(items: string[] | undefined): string | null {
+  if (!Array.isArray(items) || items.length === 0) return null;
+  const lines = items
+    .filter((s): s is string => typeof s === "string" && s.trim() !== "")
+    .map((s) => s.trim());
+  return lines.length > 0 ? lines.join(" / ") : null;
+}
+
+/**
+ * Render today's MAJOR vitamin/mineral intake (拡張①) into one compact line. The
+ * client already bounded the set, dropped null/unmeasured micros, and formatted
+ * each as "label value unit" (e.g. "ビタミンC 80mg"), so we just join the entries
+ * (any stray non-string is dropped). Returns null when there's nothing to show, so
+ * the prompt omits the line — an unlogged micro is never shown as a fabricated 0.
+ */
+export function formatIntakeMicros(items: string[] | undefined): string | null {
   if (!Array.isArray(items) || items.length === 0) return null;
   const lines = items
     .filter((s): s is string => typeof s === "string" && s.trim() !== "")
@@ -549,6 +662,7 @@ export const AUTO_LOG_PROTOCOL = [
   "- grams は必ず現実的な実数の分量にすること。**0 や空（省略）は禁止**。ユーザーが分量を言わなかったときは、その料理の標準的な1人前を常識から見積もって入れる（例: 焼き芋1本≈150g、ご飯茶碗1杯≈150g、卵1個≈50g、バナナ1本≈100g）。分量が本当に見当もつかないときはブロックを出さず質問する（0 で記録しない）。",
   "- 飲み物や具材が分からないときはブロックを出さず、まず質問すること。不明なものを勝手に作らない。",
   "- ブロックは半角の波括弧で正しい JSON にすること。ブロック以外の場所にこの記号を書かないこと。",
+  "- **【最重要・記録の整合性】本文で「記録しました」「登録しておきました」「記録しておきました」のように“記録が完了した”と書くなら、その同じ返信に必ずブロックを付けること。ブロックを付けないのに記録完了を断言するのは禁止です（ユーザーには記録されたように見えて実際には保存されない事故になります）。まだ確定していない・分量が分からない等でブロックを出せないときは、記録完了とは書かず「確認できたら記録しますね」「分量を教えてください」のように“これから”の言い方にとどめること。**",
 ].join("\n");
 
 /**
@@ -573,6 +687,29 @@ export const WORKOUT_LOG_PROTOCOL = [
   "- 消費カロリーや総挙上量などの **数値は本文に断言で書かない**（アプリが MET と体重から推定し、総挙上量は重量×回数の合計を正確に計算します）。種目・回数・重量・時間だけを伝える。",
   "- 種目・回数・時間が分からないときはブロックを出さず、まず質問すること。不明な数値を勝手に作らない。",
   "- ブロックは半角の波括弧で正しい JSON にすること。",
+  "- **【最重要・記録の整合性】本文で「記録しました」「記録しておきました」のように“記録が完了した”と書くなら、その同じ返信に必ずブロックを付けること。ブロックを付けないのに記録完了を断言するのは禁止です。まだ確定していないときは記録完了とは書かず「確認できたら記録しますね」のように“これから”の言い方にとどめること。**",
+].join("\n");
+
+/**
+ * The SLEEP auto-log protocol (chat→睡眠, text-driven). Mirrors the meal/workout
+ * protocols: rally to get BOTH 就寝/起床 times, then emit ONE sentinel block on
+ * confirmation. The block carries ONLY the two clock times — the app DERIVES the
+ * sleep length (overnight-aware), so the coach must NOT write a sleep-length
+ * number as fact. Kept as its own constant so a test can assert the markers + the
+ * no-fabrication framing.
+ */
+export const SLEEP_LOG_PROTOCOL = [
+  "【睡眠の自動記録について】",
+  "ユーザーが睡眠を言葉で伝えてきたら（例「昨日23時に寝て今朝7時に起きた」「0時就寝6時半起床」）、就寝時刻と起床時刻の both（両方）を確認してください。片方しか分からないときはブロックを出さず、もう片方を1つ質問する（rally）。",
+  "【記録意図が必須】単に睡眠の感想や雑談（例「よく眠れた」「寝不足ぎみ」）を言われただけではブロックを出さないこと。ユーザーが睡眠を“記録したい／つけてほしい”と明確に意図している（記録/記入/登録/つけて/メモ等、または時刻を「記録して」と渡してきた）ときにだけブロックを出す。意図が曖昧なら『睡眠として記録しておきますか？』と一度確認してから。",
+  "両方の時刻が確定し、かつ記録の意図が確認できたターンになって初めて、本文で「睡眠を記録しておきました」のように自然に伝え、本文の最後に次の形式のブロックを付けてください（ユーザーには表示されず、アプリが睡眠記録に変換します）:",
+  `${SLEEP_LOG_OPEN}{"bedtime":"<就寝 HH:MM>","wakeTime":"<起床 HH:MM>","mode":"new|correct"}${SLEEP_LOG_CLOSE}`,
+  "ブロックのルール（最重要）:",
+  "- bedtime / wakeTime は24時間表記の HH:MM（例 23:00 / 07:30）。両方必須。どちらか不明ならブロックを出さず質問する。",
+  "- 睡眠は1日1件（同じ日に再記録すると上書き）。睡眠時間（◯時間）は本文に断言で書かない（アプリが就寝→起床から自動計算します。深夜またぎも自動対応）。時刻だけを伝える。",
+  '- 「昨日は◯時に寝た」のように過去の日付を指定されたら、いつも通りブロックを付けてよい（アプリが指定日に保存します）。mode は通常 "new"。',
+  "- ブロックは半角の波括弧で正しい JSON にすること。",
+  "- **【最重要・記録の整合性】本文で「記録しました」「記録しておきました」のように“記録が完了した”と書くなら、その同じ返信に必ずブロックを付けること。ブロックを付けないのに記録完了を断言するのは禁止です。まだ両方の時刻が確定していないときは記録完了とは書かず「起きた時刻も教えてください」のように“これから”の言い方にとどめること。**",
 ].join("\n");
 
 /**
@@ -594,6 +731,9 @@ export const TIME_AWARENESS_GUIDE = [
   "・上の「今日の食事内容」「今日の運動内容」は、ユーザーが実際に記録した“何を食べ・何をやったか”そのものです。これを把握した上で会話してください（例: 「今日は鶏むね肉とごはんとサラダを食べてますね」「筋トレはベンチとスクワットをやりましたね」）。聞かれたら記録された内容をそのまま答え、アドバイスの根拠にも使います。",
   "・ただし内容も接地厳守: そこに書かれていない料理・種目・分量を勝手に足したり作ったりしないこと。「今日の食事内容」「今日の運動内容」が無い（記録がまだ）ときは、内容を勝手にでっち上げず「まだ記録が見当たりません」と伝えてください。",
   "・ただし接地を最優先に: 記録に無い食事・時刻を勝手に作らないこと。参照していいのは上に書かれた現在時刻と実際に記録された時刻だけです。時刻が無いときは時間の話を無理に持ち出さない。",
+  "・「最近の記録（直近の数日）」が渡されているときは、それを使って数日単位の傾向（食べ過ぎ/たんぱく不足/睡眠不足の連続など）にも触れてよい。ただしそこに書かれた日と数値だけを使い、書かれていない日を勝手に作らないこと。",
+  "・「今日の睡眠」「最近の記録」に睡眠が出ているときは、睡眠の長さを踏まえて助言してよい（例: 睡眠が短い日が続くなら回復を促す）。睡眠が記録されていない日について睡眠時間を断定しないこと。",
+  "・ユーザーが「これは昨日の分」「一昨日の記録として」のように過去の日付を指定して記録を頼んだときは、いつも通り記録ブロックを付けてよい（アプリがユーザーの指定どおり過去の日に保存します）。『今日の分しか記録できない』などと断らないこと。",
 ].join("\n");
 
 /**
@@ -657,6 +797,8 @@ export function buildChatPrompt(messages: ChatTurn[], ctx?: ChatContext): string
     "",
     WORKOUT_LOG_PROTOCOL,
     "",
+    SLEEP_LOG_PROTOCOL,
+    "",
     "【ユーザーの今日のデータ】",
     contextBlock ?? "（データは提供されていません。具体的な数値が必要なときは、推定であることを明示してください。）",
     "",
@@ -675,7 +817,7 @@ export function buildChatPrompt(messages: ChatTurn[], ctx?: ChatContext): string
     formatTranscript(messages, coachName),
     "",
     `上記の会話に続けて、${coachName}として次の返信を1つだけ、自然な日本語のふつうの文章で書いてください。`,
-    `本文は自然な文章にし、箇条書きや JSON の体裁にはしないでください。ただし記録できる段階になったときだけ、本文の最後に食事は ${MEAL_LOG_OPEN}…${MEAL_LOG_CLOSE}、筋トレ・運動は ${WORKOUT_LOG_OPEN}…${WORKOUT_LOG_CLOSE} のブロックを付けてよい（上記ルール参照）。それ以外の余計な体裁は不要です。`,
+    `本文は自然な文章にし、箇条書きや JSON の体裁にはしないでください。ただし記録できる段階になったときだけ、本文の最後に食事は ${MEAL_LOG_OPEN}…${MEAL_LOG_CLOSE}、筋トレ・運動は ${WORKOUT_LOG_OPEN}…${WORKOUT_LOG_CLOSE}、睡眠は ${SLEEP_LOG_OPEN}…${SLEEP_LOG_CLOSE} のブロックを付けてよい（上記ルール参照）。それ以外の余計な体裁は不要です。`,
   );
   return parts.join("\n");
 }

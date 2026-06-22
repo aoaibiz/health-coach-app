@@ -192,6 +192,14 @@ export function MealItemsEditor({ items, onChange }: Props) {
         )}
         {totals.fatG != null && <Macro label="F" value={totals.fatG} className="text-amber-500" />}
         {totals.carbG != null && <Macro label="C" value={totals.carbG} className="text-sky-500" />}
+        {/* Extra nutrients — only when at least one item contributed a figure
+            (null total → omitted; never a fabricated 0). */}
+        {totals.fiberG != null && <Nut label="食物繊維" value={totals.fiberG} unit="g" />}
+        {totals.sugarG != null && <Nut label="糖質" value={totals.sugarG} unit="g" />}
+        {totals.sodiumMg != null && <Nut label="塩分(Na)" value={totals.sodiumMg} unit="mg" />}
+        {totals.saturatedFatG != null && (
+          <Nut label="飽和脂肪" value={totals.saturatedFatG} unit="g" />
+        )}
       </div>
       {totals.estimated && (
         <p className="mt-1.5 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">
@@ -325,6 +333,16 @@ function Macro({ label, value, className }: { label: string; value: number; clas
   return (
     <span className="rounded-md bg-slate-50 px-2 py-0.5 text-xs tabular-nums text-slate-500 dark:bg-navy-800/60 dark:text-navy-300">
       <span className={`font-bold ${className}`}>{label}</span> {formatNumber(value)}g
+    </span>
+  );
+}
+
+/** Compact extra-nutrient total tag (rendered only for a non-null figure). */
+function Nut({ label, value, unit }: { label: string; value: number; unit: string }) {
+  return (
+    <span className="rounded-md bg-slate-50 px-2 py-0.5 text-xs tabular-nums text-slate-400 dark:bg-navy-800/60 dark:text-navy-400">
+      {label} {formatNumber(value)}
+      {unit}
     </span>
   );
 }

@@ -39,6 +39,7 @@ import {
   type LoggedMealTime,
   type MealAnalysisContext,
   type MealAnalysisItem,
+  type RecentDaySummary,
   type RegisteredProfile,
 } from "../_llm/chat-prompt";
 
@@ -258,7 +259,13 @@ export function shapeContext(raw: ChatContext | undefined): ChatContext | undefi
 
   // kcal fields and gram (PFC) fields get DIFFERENT sane ranges. Each is clamped
   // to [0, max]; negative / NaN / Infinity → omitted (never bad-advice numbers).
-  const kcalKeys: Array<keyof ChatContext> = ["targetKcal", "intakeKcal", "burnKcal"];
+  const kcalKeys: Array<keyof ChatContext> = [
+    "targetKcal",
+    "intakeKcal",
+    "burnKcal",
+    "targetBmr",
+    "targetTdee",
+  ];
   const gramKeys: Array<keyof ChatContext> = [
     "targetProteinG",
     "targetFatG",
@@ -305,7 +312,85 @@ export function shapeContext(raw: ChatContext | undefined): ChatContext | undefi
   const mealAnalysis = shapeMealAnalysis(raw.mealAnalysis);
   if (mealAnalysis) out.mealAnalysis = mealAnalysis;
 
+  // Today's MAJOR vitamins/minerals (拡張①) — own data, sanitised + bounded like
+  // the other content lines (each single-lined + length-clamped, count capped).
+  const intakeMicros = shapeIntakeMicros(raw.intakeMicros);
+  if (intakeMicros.length > 0) out.intakeMicros = intakeMicros;
+
+  // Today's sleep summary (一行) + the recent-days digest — own data, sanitised +
+  // bounded like the other content fields (no injected heading, capped counts).
+  const sleepToday = cleanStr(raw.sleepToday, MAX_CONTENT_LINE_CHARS);
+  if (sleepToday) out.sleepToday = sleepToday;
+  const recentDays = shapeRecentDays(raw.recentDays);
+  if (recentDays.length > 0) out.recentDays = recentDays;
+
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** Max recent days forwarded into the prompt (bounded cost). */
+const MAX_RECENT_DAYS = 7;
+/** Max length of a recent-day sleep label once single-lined. */
+const MAX_SLEEP_LABEL_CHARS = 20;
+
+/**
+ * Shape the (untrusted) recent-days digest. Each day must carry a usable label
+ * (single safe line); its numbers are clamped to sane ranges (absurd/negative →
+ * dropped) and the sleep string is sanitised + length-clamped. Day count is
+ * bounded. A day with only a label and no usable field is dropped. Returns [] when
+ * nothing usable, so the prompt omits the line (never an invented past day).
+ */
+export function shapeRecentDays(raw: unknown): RecentDaySummary[] {
+  if (!Array.isArray(raw)) return [];
+  const out: RecentDaySummary[] = [];
+  for (const it of raw.slice(0, MAX_RECENT_DAYS)) {
+    if (!it || typeof it !== "object") continue;
+    const o = it as Record<string, unknown>;
+    const label = cleanStr(o.label, 24);
+    if (!label) continue;
+    const day: RecentDaySummary = { label };
+    const intakeKcal = cleanClampedNum(o.intakeKcal, MAX_KCAL);
+    if (intakeKcal !== null) day.intakeKcal = intakeKcal;
+    const mealCount = cleanClampedNum(o.mealCount, 50);
+    if (mealCount !== null) day.mealCount = Math.round(mealCount);
+    const burnKcal = cleanClampedNum(o.burnKcal, MAX_KCAL);
+    if (burnKcal !== null) day.burnKcal = burnKcal;
+    const exerciseCount = cleanClampedNum(o.exerciseCount, 50);
+    if (exerciseCount !== null) day.exerciseCount = Math.round(exerciseCount);
+    const sleep = cleanStr(o.sleep, MAX_SLEEP_LABEL_CHARS);
+    if (sleep) day.sleep = sleep;
+    // Keep only days that carry at least one real metric (not just a label).
+    if (
+      day.intakeKcal !== undefined ||
+      day.burnKcal !== undefined ||
+      day.sleep !== undefined ||
+      day.mealCount !== undefined ||
+      day.exerciseCount !== undefined
+    ) {
+      out.push(day);
+    }
+  }
+  return out;
+}
+
+/** Max intake-micro lines forwarded (拡張① — the curated 主要 set is ~10; cap is
+ *  bounded defense-in-depth so a tampered request can't balloon the prompt). */
+const MAX_INTAKE_MICRO_LINES = 18;
+
+/**
+ * Shape the (untrusted) today's-intake micros summary (拡張①). The client sends
+ * pre-formatted "label value unit" lines for the bounded 主要 set; the endpoint
+ * still treats them as untrusted — each line is sanitised to a single safe line
+ * (no injected heading) + length-clamped, and the count is bounded. Returns []
+ * when nothing usable (the prompt omits the line — an unlogged micro is never 0).
+ */
+export function shapeIntakeMicros(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const line of raw.slice(0, MAX_INTAKE_MICRO_LINES)) {
+    const s = cleanStr(line, MAX_CONTENT_LINE_CHARS);
+    if (s) out.push(s);
+  }
+  return out;
 }
 
 /** Max logged meal-times forwarded (one day's slots — bounded; defensive). */

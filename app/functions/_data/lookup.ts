@@ -7,6 +7,7 @@
 
 import lookupJson from "./nutrition-lookup.json";
 import { normalizeName } from "../_lib/normalize";
+import type { Micros } from "../_lib/micros";
 
 /** One per-100g food row from the MEXT table. */
 export interface FoodEntry {
@@ -22,6 +23,22 @@ export interface FoodEntry {
   protein_g: number;
   fat_g: number;
   carb_g: number;
+  /**
+   * Additional per-100g nutrients (「全栄養素を出す」). UNLIKE PFC these are NULLABLE:
+   * the MEXT table leaves some cells unmeasured, and we keep that as `null` (never
+   * a fabricated 0) so the UI honestly shows "—". 食物繊維総量(g) / 利用可能炭水化物
+   * 単糖当量を糖質の参考値として(g) / ナトリウム(mg) / 食塩相当量(g)。
+   */
+  fiber_g: number | null;
+  sugar_g: number | null;
+  sodium_mg: number | null;
+  salt_g: number | null;
+  /**
+   * Per-100g vitamins/minerals (拡張①). NULLABLE like the nutrients above: a key
+   * is null when the row doesn't measure it. `null` (no nested object) when the
+   * row measures NO micro at all (compact bundle). See functions/_lib/micros.ts.
+   */
+  micros: Micros | null;
 }
 
 interface LookupFile {
