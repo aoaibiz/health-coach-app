@@ -11,6 +11,7 @@
 
 import type { Meal, SleepLog, Workout } from "./types";
 import type { RecentDaySummary } from "./chat";
+import { buildLoggedMealItems } from "./chat";
 import { sumIntake } from "./intake";
 import { workoutBurn } from "./burn";
 import { formatDateLabel, shiftDateKey } from "./date";
@@ -20,6 +21,14 @@ export type { RecentDaySummary };
 
 /** How many recent days (excluding today) the coach digest spans by default. */
 export const RECENT_DAYS_DEFAULT = 7;
+
+/**
+ * For how many of the most-recent days the digest also carries the per-meal item
+ * detail (品目+grams), not just the kcal aggregate. Bounded (≠ the full 7-day
+ * span) so the prompt stays small while still letting the coach honour "昨日と
+ * 同じで記録" by grounding on the real items. Yesterday is always covered.
+ */
+export const MEAL_DETAIL_DAYS = 3;
 
 /**
  * Build the recent-days digest for the N days BEFORE `todayKey` (most-recent
@@ -61,6 +70,12 @@ export function buildRecentDays(args: {
     if (hasIntake) {
       day.intakeKcal = Math.round(intake.calories);
       day.mealCount = dayMeals.length;
+      // Item-level detail only for the most-recent few days (token-bounded) so the
+      // coach can ground "昨日と同じで記録" on the real items+grams, not a guess.
+      if (i <= MEAL_DETAIL_DAYS) {
+        const detail = buildLoggedMealItems(dayMeals);
+        if (detail) day.meals = detail;
+      }
     }
     if (exerciseCount > 0) {
       day.exerciseCount = exerciseCount;

@@ -331,6 +331,20 @@ describe("sleep + recent-days context (Features ① + ②)", () => {
     expect(formatRecentDays(undefined)).toBeNull();
   });
 
+  it("formatRecentDays renders per-meal item detail as a sub-line (grounds 「昨日と同じ」)", () => {
+    const out = formatRecentDays([
+      {
+        label: "6月20日(金)",
+        intakeKcal: 336,
+        mealCount: 1,
+        meals: [{ type: "夕", items: ["角ハイボール350g"] }],
+      },
+    ]);
+    expect(out).not.toBeNull();
+    expect(out).toContain("6月20日(金): 摂取336kcal(1食)");
+    expect(out).toContain("└ [夕食] 角ハイボール350g"); // 実品目が prompt に届く(slotラベルは夕→夕食)
+  });
+
   it("the recent-days digest appears in the context block", () => {
     const block = formatChatContext({
       recentDays: [{ label: "6月20日(金)", intakeKcal: 1800, mealCount: 3 }],

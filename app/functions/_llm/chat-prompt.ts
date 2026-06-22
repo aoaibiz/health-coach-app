@@ -195,6 +195,11 @@ export interface RecentDaySummary {
   exerciseCount?: number;
   /** Sleep length (e.g. "7時間0分") when logged that day. */
   sleep?: string;
+  /**
+   * Per-meal item detail for the most-recent few days only (item-capped by the
+   * client) so the coach can ground "昨日と同じで記録" on the real items+grams.
+   */
+  meals?: LoggedMealContent[];
 }
 
 export interface ChatContext {
@@ -550,7 +555,12 @@ export function formatRecentDays(days: RecentDaySummary[] | undefined): string |
     }
     if (typeof d.sleep === "string" && d.sleep.trim()) parts.push(`睡眠 ${d.sleep.trim()}`);
     if (parts.length === 0) continue;
-    lines.push(`  ${label}: ${parts.join(" / ")}`);
+    let line = `  ${label}: ${parts.join(" / ")}`;
+    // Item-level meal detail (recent days only) → sub-line, so the coach can copy
+    // the exact items+grams for "昨日と同じで記録" instead of guessing.
+    const mealDetail = formatLoggedMealItems(d.meals);
+    if (mealDetail) line += `\n    └ ${mealDetail}`;
+    lines.push(line);
   }
   return lines.length > 0 ? lines.join("\n") : null;
 }
@@ -661,6 +671,7 @@ export const AUTO_LOG_PROTOCOL = [
   "- grams は1単位のグラム数、qty は個数/杯数。例: ごはん2杯 → grams:150, qty:2。",
   "- grams は必ず現実的な実数の分量にすること。**0 や空（省略）は禁止**。ユーザーが分量を言わなかったときは、その料理の標準的な1人前を常識から見積もって入れる（例: 焼き芋1本≈150g、ご飯茶碗1杯≈150g、卵1個≈50g、バナナ1本≈100g）。分量が本当に見当もつかないときはブロックを出さず質問する（0 で記録しない）。",
   "- 飲み物や具材が分からないときはブロックを出さず、まず質問すること。不明なものを勝手に作らない。",
+  "- ユーザーが「昨日と同じ」「いつものやつ」のように過去と同じ食事を記録したいと**確定的に**言ったときは、上の『最近の記録（直近の数日）』から該当する食事を探し、その品目・分量と同じ内容でブロックを出して記録する（過去の実記録に接地・数値は捏造しない）。最近の記録に該当が無ければブロックを出さず、何を食べたか質問する。なお「昨日と同じになるかと」「このあと食べます」のような未来・予定の言い方は確定ではない＝まだ記録せず、確定したターンで記録すること。",
   "- ブロックは半角の波括弧で正しい JSON にすること。ブロック以外の場所にこの記号を書かないこと。",
   "- **【最重要・記録の整合性】本文で「記録しました」「登録しておきました」「記録しておきました」のように“記録が完了した”と書くなら、その同じ返信に必ずブロックを付けること。ブロックを付けないのに記録完了を断言するのは禁止です（ユーザーには記録されたように見えて実際には保存されない事故になります）。まだ確定していない・分量が分からない等でブロックを出せないときは、記録完了とは書かず「確認できたら記録しますね」「分量を教えてください」のように“これから”の言い方にとどめること。**",
 ].join("\n");

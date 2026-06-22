@@ -329,6 +329,8 @@ export function shapeContext(raw: ChatContext | undefined): ChatContext | undefi
 
 /** Max recent days forwarded into the prompt (bounded cost). */
 const MAX_RECENT_DAYS = 7;
+/** For how many recent days the per-meal item detail survives shaping (token-bounded). */
+const MAX_RECENT_MEAL_DETAIL_DAYS = 3;
 /** Max length of a recent-day sleep label once single-lined. */
 const MAX_SLEEP_LABEL_CHARS = 20;
 
@@ -342,7 +344,7 @@ const MAX_SLEEP_LABEL_CHARS = 20;
 export function shapeRecentDays(raw: unknown): RecentDaySummary[] {
   if (!Array.isArray(raw)) return [];
   const out: RecentDaySummary[] = [];
-  for (const it of raw.slice(0, MAX_RECENT_DAYS)) {
+  for (const [idx, it] of raw.slice(0, MAX_RECENT_DAYS).entries()) {
     if (!it || typeof it !== "object") continue;
     const o = it as Record<string, unknown>;
     const label = cleanStr(o.label, 24);
@@ -358,13 +360,22 @@ export function shapeRecentDays(raw: unknown): RecentDaySummary[] {
     if (exerciseCount !== null) day.exerciseCount = Math.round(exerciseCount);
     const sleep = cleanStr(o.sleep, MAX_SLEEP_LABEL_CHARS);
     if (sleep) day.sleep = sleep;
+    // Per-meal item detail survives shaping only for the most-recent few days
+    // (token-bounded), via the SAME sanitiser as today's items (non-string removal,
+    // slot allowlist, single-line, item cap) so "昨日と同じで記録" can ground on
+    // the real items without letting an untrusted client balloon/inject the prompt.
+    if (idx < MAX_RECENT_MEAL_DETAIL_DAYS) {
+      const meals = shapeLoggedMealItems(o.meals);
+      if (meals.length > 0) day.meals = meals;
+    }
     // Keep only days that carry at least one real metric (not just a label).
     if (
       day.intakeKcal !== undefined ||
       day.burnKcal !== undefined ||
       day.sleep !== undefined ||
       day.mealCount !== undefined ||
-      day.exerciseCount !== undefined
+      day.exerciseCount !== undefined ||
+      day.meals !== undefined
     ) {
       out.push(day);
     }

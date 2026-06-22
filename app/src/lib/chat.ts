@@ -159,6 +159,14 @@ export interface RecentDaySummary {
   exerciseCount?: number;
   /** Sleep length that day (e.g. "7時間0分"), when sleep was logged. */
   sleep?: string;
+  /**
+   * WHAT was eaten that day, per meal slot (item lines like "ごはん150g・卵50g").
+   * Only attached for the most-recent few days (token-bounded) so the coach can
+   * honour "昨日と同じで記録" by grounding on the real items+grams — never the
+   * standard-portion fabrication it would otherwise guess. Same shape as today's
+   * loggedMealItems; built by buildLoggedMealItems (item cap applied).
+   */
+  meals?: LoggedMealContent[];
 }
 
 export interface ChatWireMessage {

@@ -55,10 +55,6 @@ import {
 } from "@/lib/chatMealLog";
 import { estimateLoggedMeal } from "@/lib/chatMealEstimate";
 import {
-  resolveSameAsYesterday,
-  sameAsYesterdayConfirmation,
-} from "@/lib/sameAsYesterday";
-import {
   ambiguousDateNote,
   backdatedNote,
   resolveRelativeDateKeyForKind,
@@ -349,30 +345,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // a setMessages updater.
         const withUser = appendMessage(userMsg);
 
-        // ---- 1b. "昨日と同じ量" shortcut (deterministic, no LLM round-trip) ----
-        // When the user says "log the same as yesterday" for a meal slot, the coach
-        // (which only sees TODAY's data) used to re-ask for grams and never record it.
-        // Instead, reuse YESTERDAY's actual logged meal for that slot: copy its items
-        // + grams + kcal/PFC verbatim and log it for today, WITHOUT re-asking. This is
-        // a TEXT-only intent (no photo); if yesterday genuinely has no record for the
-        // slot, resolveSameAsYesterday returns null → we fall through to the normal
-        // coach path (which then asks). Nothing is fabricated — the numbers are
-        // yesterday's own grounded record.
-        if (!hasPhotos) {
-          const reuse = resolveSameAsYesterday(trimmed, loadMeals());
-          if (reuse) {
-            saveMeals([...loadMeals(), reuse.meal]);
-            const itemCount = reuse.meal.nutrition?.items?.length ?? 0;
-            appendMessage({
-              id: makeId(),
-              role: "assistant",
-              content: sameAsYesterdayConfirmation(reuse),
-              createdAt: new Date().toISOString(),
-              loggedMeal: { mealId: reuse.meal.id, itemCount },
-            });
-            return; // logged directly — skip the LLM call entirely
-          }
-        }
+        // NOTE(2026-06-22 Ao): 「昨日と同じ量」の“LLMを呼ばない決定的ショートカット”は撤去した。
+        // コーチは最近の食事文脈(直近数日)を持つので、『昨日と同じで記録』も LLM が会話で意図を
+        // 読み、meal-log protocol 経由で記録する。全メッセージを必ず LLM に通す＝考え中が出る・
+        // 会話の意図を読む・未来の予定(「昨日と同じになるかと」)を即記録する誤動作も無くなる。
 
         // Snapshot the correction targets NOW (at send time), from the array that
         // existed when this user turn was added. This binds any correction to the
