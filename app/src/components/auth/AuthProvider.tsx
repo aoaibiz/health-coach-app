@@ -16,6 +16,14 @@ import {
 } from "@/lib/authState";
 import * as authApi from "@/lib/authApi";
 import { isPushSupported, registerServiceWorker } from "@/lib/push";
+import {
+  clearAllLocalData,
+  clearLastUserId,
+  getLastUserId,
+  hasAnyUserData,
+  setLastUserId,
+  userIdentityKey,
+} from "@/lib/userScope";
 
 interface AuthContextValue {
   state: AuthState;
@@ -72,8 +80,66 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     void registerServiceWorker();
   }, [state.status]);
 
+  // ── USER-BOUNDARY DATA ISOLATION (privacy) ────────────────────────────────
+  // All user data lives in per-DEVICE localStorage (+ IndexedDB photos) under
+  // fixed, un-namespaced keys. When a DIFFERENT user becomes authed on this
+  // browser (login, or a session-check resolving to someone new), the previous
+  // user's local data MUST be wiped — otherwise the new user would see the prior
+  // user's profile/meals/chat/photos (the cross-account leak). The SAME user, or
+  // the first-ever login on this browser, keeps local intact (it's their data).
+  //
+  // This app has NO server-side data sync, so the wipe is unconditional for a
+  // switched/unknown user — there is no merge to sequence against.
+  useEffect(() => {
+    if (state.status !== "authed") return;
+
+    const identity = userIdentityKey(state.user);
+    const previous = getLastUserId();
+    const isDifferentUser = !!identity && !!previous && identity !== previous;
+    // FAIL CLOSED on an UNKNOWN identity: if we can't derive who this is (no
+    // id/email) we cannot prove leftover local data belongs to this session's
+    // user, so we wipe rather than expose it whenever ANY user data is present.
+    // `hasAnyUserData()` (not just a recorded previous user) also covers the
+    // pre-fix-upgrade path: data already on disk before lastUserId was ever set.
+    const unknownIdentityWithData = !identity && (!!previous || hasAnyUserData());
+    const mustClear = isDifferentUser || unknownIdentityWithData;
+
+    let cancelled = false;
+    void (async () => {
+      if (mustClear) {
+        await clearAllLocalData().catch(() => undefined);
+      }
+      if (cancelled) return;
+      // Bind this browser to the current user so the NEXT login can detect a
+      // switch. When identity is unknown, forget the binding so the next login
+      // also fails closed rather than matching a stale id.
+      if (identity) setLastUserId(identity);
+      else clearLastUserId();
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [state.status, state.user]);
+
   const login = useCallback(async (email: string, password: string) => {
     const { user, csrfToken } = await authApi.login(email, password);
+    // PRIVACY: reconcile the user boundary BEFORE committing authed state, so the
+    // app shell never mounts over a DIFFERENT user's leftover local data even for
+    // a moment (e.g. user A still authed in this SPA → user B logs in without a
+    // prior logout). Mirrors the passive effect's decision, but runs synchronously
+    // ahead of setState to close the brief render window. The passive effect below
+    // still backstops the /auth/me (reload) path. Same user / clean device → no
+    // wipe (the user keeps their own data).
+    const identity = userIdentityKey(user);
+    const previous = getLastUserId();
+    const isDifferentUser = !!identity && !!previous && identity !== previous;
+    const unknownIdentityWithData = !identity && (!!previous || hasAnyUserData());
+    if (isDifferentUser || unknownIdentityWithData) {
+      await clearAllLocalData().catch(() => undefined);
+    }
+    if (identity) setLastUserId(identity);
+    else clearLastUserId();
     setState(reduceLoggedIn(user, csrfToken));
   }, []);
 
@@ -89,9 +155,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const logout = useCallback(async () => {
     // Capture the current csrf token for the X-CSRF-Token header, then clear
     // local state regardless of the network result so the user lands on login.
+    // A network-layer failure (offline/DNS) rejects authApi.logout(); swallow it
+    // so `void logout()` callers never see an unhandled rejection — the contract
+    // is "always lands on login", and the local wipe below runs regardless.
     try {
       await authApi.logout(stateRef.current.csrfToken);
+    } catch {
+      /* network logout failed — still clear local state below */
     } finally {
+      // PRIVACY: WIPE this user's local data (localStorage sections + IndexedDB
+      // photos) and forget the browser-bound user. On a shared device the next
+      // person must NOT see the prior user's profile/meals/chat/photos. The auth
+      // API logout already revoked the session server-side; this clears the local
+      // footprint to match.
+      await clearAllLocalData().catch(() => undefined);
+      clearLastUserId();
       setState(reduceLoggedOut());
     }
     // stateRef is a stable ref object → not a dependency.
