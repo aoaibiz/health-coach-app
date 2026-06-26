@@ -44,14 +44,25 @@ const TYPE_STYLES: Record<string, string> = {
 };
 
 export function MealCard({ meal, onEdit, onDelete }: Props) {
+  const mealPhotoIds =
+    meal.photoIds && meal.photoIds.length > 0
+      ? meal.photoIds
+      : meal.photoId
+        ? [meal.photoId]
+        : [];
   return (
     <div className="surface overflow-hidden">
-      {meal.photoId && (
-        <PhotoImage
-          photoId={meal.photoId}
-          alt={meal.text || "食事の写真"}
-          className="h-44 w-full object-cover"
-        />
+      {mealPhotoIds.length > 0 && (
+        <div className={mealPhotoIds.length === 1 ? "overflow-hidden" : "grid grid-cols-2 gap-1 overflow-hidden"}>
+          {mealPhotoIds.map((id) => (
+            <PhotoImage
+              key={id}
+              photoId={id}
+              alt={meal.text || "食事の写真"}
+              className={`${mealPhotoIds.length === 1 ? "h-44" : "h-28"} w-full object-cover`}
+            />
+          ))}
+        </div>
       )}
       <div className="p-4">
         <div className="mb-1.5 flex items-center justify-between">

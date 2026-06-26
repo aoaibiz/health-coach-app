@@ -208,8 +208,10 @@ export interface Meal {
   timestamp: string;
   type: MealType;
   text: string;
-  /** IndexedDB key of the photo, if one was attached. */
+  /** IndexedDB key of the first/legacy photo, if one was attached. */
   photoId?: string;
+  /** IndexedDB keys of all photos attached to this meal. Additive; photoId remains the first photo for legacy records. */
+  photoIds?: string[];
   /** Optional user-entered calories + PFC for this meal (Phase 1: manual). */
   nutrition?: MealNutrition;
 }

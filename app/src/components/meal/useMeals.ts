@@ -38,8 +38,12 @@ export function useMeals(date: string) {
     async (id: string) => {
       const current = loadMeals();
       const target = current.find((m) => m.id === id);
-      if (target?.photoId) {
-        await deletePhoto(target.photoId).catch(() => undefined);
+      const photoIds = new Set([
+        ...(target?.photoIds ?? []),
+        ...(target?.photoId ? [target.photoId] : []),
+      ]);
+      for (const photoId of photoIds) {
+        await deletePhoto(photoId).catch(() => undefined);
       }
       persist(current.filter((m) => m.id !== id));
     },
