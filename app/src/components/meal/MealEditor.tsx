@@ -93,8 +93,15 @@ export function MealEditor({
 }: Props) {
   const [type, setType] = useState<MealType>(existing?.type ?? defaultType);
   const [text, setText] = useState(existing?.text ?? "");
-  const [photoId, setPhotoId] = useState<string | undefined>(existing?.photoId);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [photoIds, setPhotoIds] = useState<string[]>(() =>
+    existing?.photoIds && existing.photoIds.length > 0
+      ? existing.photoIds
+      : existing?.photoId
+        ? [existing.photoId]
+        : [],
+  );
+  const photoId = photoIds[0];
+  const [previewUrls, setPreviewUrls] = useState<Array<{ id: string; url: string }>>([]);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -148,12 +155,18 @@ export function MealEditor({
     setAnalyzing(true);
     try {
       // 写真があれば縮小済み Blob を base64 化して送る（送信前に縮小・既存 image.ts 流用）。
-      let imageBase64: string | undefined;
-      if (photoId) {
-        const blob = await getPhoto(photoId);
-        if (blob) imageBase64 = await blobToBase64(blob);
-      }
-      const nutrition = await analyzeMeal({ imageBase64, text: text.trim() || undefined });
+      const imageBase64List = (
+        await Promise.all(
+          photoIds.map(async (id) => {
+            const blob = await getPhoto(id);
+            return blob ? blobToBase64(blob) : null;
+          }),
+        )
+      ).filter((v): v is string => v != null);
+      const nutrition = await analyzeMeal({
+        imageBase64List: imageBase64List.length > 0 ? imageBase64List : undefined,
+        text: text.trim() || undefined,
+      });
       // 成功: 4 項目を埋め、ユーザーは編集・上書き可能。
       setShowNutrition(true);
       setCal(nutrition.calories != null ? String(nutrition.calories) : "");
@@ -181,73 +194,80 @@ export function MealEditor({
     }
   }
 
-  // Photo that was newly added in this session but not yet committed — track so
-  // we can clean it up if the user cancels.
-  const stagedPhotoRef = useRef<string | null>(null);
+  // Photos newly added in this session but not yet committed — track so
+  // we can clean them up if the user cancels.
+  const stagedPhotoIdsRef = useRef<string[]>([]);
 
-  // Load preview for an existing photo.
+  // Load previews for existing/new photos.
   useEffect(() => {
-    let url: string | null = null;
     let cancelled = false;
-    if (photoId) {
-      getPhoto(photoId).then((blob) => {
-        if (cancelled || !blob) return;
-        url = URL.createObjectURL(blob);
-        setPreviewUrl(url);
-      });
-    } else {
-      setPreviewUrl(null);
-    }
+    const urls: Array<{ id: string; url: string }> = [];
+    Promise.all(
+      photoIds.map(async (id) => {
+        const blob = await getPhoto(id);
+        if (!blob) return null;
+        return { id, url: URL.createObjectURL(blob) };
+      }),
+    ).then((next) => {
+      if (cancelled) {
+        next.forEach((entry) => {
+          if (entry) URL.revokeObjectURL(entry.url);
+        });
+        return;
+      }
+      urls.push(...next.filter((entry): entry is { id: string; url: string } => entry != null));
+      setPreviewUrls(urls);
+    });
     return () => {
       cancelled = true;
-      if (url) URL.revokeObjectURL(url);
+      urls.forEach((entry) => URL.revokeObjectURL(entry.url));
     };
-  }, [photoId]);
+  }, [photoIds]);
 
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    e.target.value = ""; // allow re-selecting same file
-    if (!file) return;
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = ""; // allow re-selecting same file(s)
+    if (files.length === 0) return;
     setBusy(true);
     try {
-      const blob = await compressImage(file);
-      const id = makeId();
-      await putPhoto(id, blob);
-      // Drop a previously staged (uncommitted) photo.
-      if (stagedPhotoRef.current && stagedPhotoRef.current !== existing?.photoId) {
-        await deletePhoto(stagedPhotoRef.current).catch(() => undefined);
+      const nextIds: string[] = [];
+      for (const file of files) {
+        const blob = await compressImage(file);
+        const id = makeId();
+        await putPhoto(id, blob);
+        nextIds.push(id);
       }
-      stagedPhotoRef.current = id;
-      setPhotoId(id);
+      stagedPhotoIdsRef.current = [...stagedPhotoIdsRef.current, ...nextIds];
+      setPhotoIds((prev) => [...prev, ...nextIds]);
     } finally {
       setBusy(false);
     }
   }
 
-  async function removePhoto() {
-    if (photoId && photoId !== existing?.photoId) {
-      await deletePhoto(photoId).catch(() => undefined);
+  async function removePhoto(id: string) {
+    const existingPhotoIds = new Set([
+      ...(existing?.photoIds ?? []),
+      ...(existing?.photoId ? [existing.photoId] : []),
+    ]);
+    if (!existingPhotoIds.has(id)) {
+      await deletePhoto(id).catch(() => undefined);
     }
-    if (stagedPhotoRef.current === photoId) stagedPhotoRef.current = null;
-    setPhotoId(undefined);
+    stagedPhotoIdsRef.current = stagedPhotoIdsRef.current.filter((photoId) => photoId !== id);
+    setPhotoIds((prev) => prev.filter((photoId) => photoId !== id));
   }
 
   function handleClose() {
-    // Discard a staged photo that was never saved.
-    if (stagedPhotoRef.current && stagedPhotoRef.current !== existing?.photoId) {
-      deletePhoto(stagedPhotoRef.current).catch(() => undefined);
-    }
+    // Discard staged photos that were never saved.
+    stagedPhotoIdsRef.current.forEach((id) => {
+      deletePhoto(id).catch(() => undefined);
+    });
+    stagedPhotoIdsRef.current = [];
     onClose();
   }
 
   function handleSave() {
     const trimmed = text.trim();
     if (!trimmed && !photoId) return; // need at least text or a photo
-
-    // If editing and the photo was swapped, remove the old orphaned photo.
-    if (existing?.photoId && existing.photoId !== photoId) {
-      deletePhoto(existing.photoId).catch(() => undefined);
-    }
 
     // When per-item rows exist, the saved nutrition is the SUM of those edited
     // items (the dashboard intake uses this final total). Otherwise fall back to
@@ -260,8 +280,17 @@ export function MealEditor({
           })
         : buildNutrition(cal, protein, fat, carb, estimateMeta);
     const now = new Date();
+    const nextPhotoIds = photoIds.length > 0 ? photoIds : undefined;
+    const nextPhotoId = nextPhotoIds?.[0];
+    const previousPhotoIds = new Set([
+      ...(existing?.photoIds ?? []),
+      ...(existing?.photoId ? [existing.photoId] : []),
+    ]);
+    previousPhotoIds.forEach((id) => {
+      if (!photoIds.includes(id)) deletePhoto(id).catch(() => undefined);
+    });
     const meal: Meal = existing
-      ? { ...existing, type, text: trimmed, photoId, nutrition }
+      ? { ...existing, type, text: trimmed, photoId: nextPhotoId, photoIds: nextPhotoIds, nutrition }
       : {
           id: makeId(),
           date,
@@ -269,10 +298,11 @@ export function MealEditor({
             date === toDateKey() ? now.toISOString() : `${date}T12:00:00.000Z`,
           type,
           text: trimmed,
-          photoId,
+          photoId: nextPhotoId,
+          photoIds: nextPhotoIds,
           nutrition,
         };
-    stagedPhotoRef.current = null; // committed
+    stagedPhotoIdsRef.current = []; // committed
     onSave(meal);
   }
 
@@ -338,37 +368,41 @@ export function MealEditor({
           ref={fileRef}
           type="file"
           accept="image/*"
+          multiple
           className="hidden"
           onChange={handleFile}
         />
-        {previewUrl ? (
-          <div className="relative mb-4 overflow-hidden rounded-xl">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={previewUrl}
-              alt="食事の写真"
-              className="max-h-56 w-full object-cover"
-            />
-            <button
-              type="button"
-              onClick={removePhoto}
-              className="absolute right-2 top-2 flex h-9 w-9 items-center justify-center rounded-full bg-black/55 text-white backdrop-blur-sm active:scale-95"
-              aria-label="写真を削除"
-            >
-              <TrashIcon className="h-5 w-5" />
-            </button>
+        {previewUrls.length > 0 && (
+          <div className="mb-3 grid grid-cols-2 gap-2">
+            {previewUrls.map(({ id, url }) => (
+              <div key={id} className="relative overflow-hidden rounded-xl">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={url}
+                  alt="食事の写真"
+                  className="h-32 w-full object-cover"
+                />
+                <button
+                  type="button"
+                  onClick={() => void removePhoto(id)}
+                  className="absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-full bg-black/55 text-white backdrop-blur-sm active:scale-95"
+                  aria-label="写真を削除"
+                >
+                  <TrashIcon className="h-4 w-4" />
+                </button>
+              </div>
+            ))}
           </div>
-        ) : (
-          <button
-            type="button"
-            onClick={() => fileRef.current?.click()}
-            disabled={busy}
-            className="mb-4 flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-slate-300 py-4 text-sm font-medium text-slate-500 transition hover:bg-slate-50 disabled:opacity-50 dark:border-navy-700 dark:text-navy-300 dark:hover:bg-navy-800"
-          >
-            <CameraIcon className="h-5 w-5" />
-            {busy ? "処理中…" : "写真を追加"}
-          </button>
         )}
+        <button
+          type="button"
+          onClick={() => fileRef.current?.click()}
+          disabled={busy}
+          className="mb-4 flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-slate-300 py-4 text-sm font-medium text-slate-500 transition hover:bg-slate-50 disabled:opacity-50 dark:border-navy-700 dark:text-navy-300 dark:hover:bg-navy-800"
+        >
+          <CameraIcon className="h-5 w-5" />
+          {busy ? "処理中…" : previewUrls.length > 0 ? "写真をさらに追加" : "写真を追加"}
+        </button>
 
         {/* AI 解析 — 写真/テキストから栄養を推定（MEXT DB 接地）。手入力は併存。 */}
         <div className="mb-3">
