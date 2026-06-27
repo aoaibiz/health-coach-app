@@ -9,6 +9,7 @@ import { CalorieRing } from "@/components/CalorieRing";
 import { MacroProgress } from "@/components/MacroProgress";
 import { Disclaimer } from "@/components/Disclaimer";
 import { WeightSection } from "@/components/dashboard/WeightSection";
+import { NutritionRings } from "@/components/dashboard/NutritionRings";
 import { useDailyData } from "@/components/dashboard/useDailyData";
 import { MicroNutrientsPanel } from "@/components/nutrition/MicroNutrientsPanel";
 import { hasAnyMicro } from "../../../functions/_lib/micros";
@@ -16,6 +17,7 @@ import { hasApiKey } from "@/lib/analyzeMeal";
 import { suggestNext } from "@/lib/suggest";
 import { formatNumber } from "@/lib/workout";
 import { ChartIcon, FlameIcon, MealIcon, UserIcon } from "@/components/icons";
+import { DATA_CHANGED_EVENT } from "@/lib/syncData";
 
 export function DashboardView() {
   const { date, setDate } = useSelectedDate();
@@ -29,9 +31,13 @@ export function DashboardView() {
     const refresh = () => setHasKey(hasApiKey());
     window.addEventListener("focus", refresh);
     window.addEventListener("storage", refresh);
+    // In-tab login restore can bring the access key back without a `storage`
+    // event; listen for the same-document signal so the empty-state hint clears.
+    window.addEventListener(DATA_CHANGED_EVENT, refresh);
     return () => {
       window.removeEventListener("focus", refresh);
       window.removeEventListener("storage", refresh);
+      window.removeEventListener(DATA_CHANGED_EVENT, refresh);
     };
   }, []);
 
@@ -79,10 +85,13 @@ function DashboardBody({
   const suggestion = suggestNext(intake, t);
 
   return (
-    <div className="space-y-4">
-      {/* HERO — net calories ring + suggestion. Stays within first view. */}
-      <section className="surface p-5">
-        <div className="mb-3 flex items-center justify-between">
+    <div className="stagger space-y-4">
+      {/* HERO — net calories ring + suggestion. Stays within first view. A faint
+          accent gradient overlay lifts it above the other cards as the focal
+          point of the screen. */}
+      <section className="surface relative overflow-hidden bg-gradient-to-br from-accent/[0.06] to-transparent p-5 dark:from-accent-light/[0.08]">
+        <div aria-hidden className="pointer-events-none absolute -right-16 -top-16 h-44 w-44 rounded-full bg-accent/10 blur-3xl dark:bg-accent-light/10" />
+        <div className="relative mb-3 flex items-center justify-between">
           <h1 className="flex items-center gap-1.5 text-sm font-bold uppercase tracking-wider text-slate-500 dark:text-navy-300">
             <ChartIcon className="h-4 w-4" /> 今日の成果
           </h1>
@@ -148,7 +157,21 @@ function DashboardBody({
         )}
       </section>
 
-      {/* PFC balance */}
+      {/* 栄養の見える化 (③) — Apple-Watch-style rings: カロリー + P/F/C vs target,
+          "あと◯g" at a glance. Real grounded totals (sumIntake excludes plans). */}
+      <section className="surface space-y-4 p-5">
+        <h2 className="text-sm font-bold text-slate-700 dark:text-navy-100">
+          栄養の見える化
+        </h2>
+        <NutritionRings intake={intake} targets={t} />
+        {intake.loggedCount === 0 && (
+          <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-400 dark:bg-navy-800/60 dark:text-navy-400">
+            食事を記録すると、目標までの残りが一目で分かります。
+          </p>
+        )}
+      </section>
+
+      {/* PFC balance — the detailed bars under the rings. */}
       <section className="surface space-y-4 p-5">
         <h2 className="text-sm font-bold text-slate-700 dark:text-navy-100">
           PFC バランス
@@ -279,7 +302,7 @@ function NutrientStat({
   unit: string;
 }) {
   return (
-    <div className="rounded-xl bg-slate-50 py-3 px-3 dark:bg-navy-800/60">
+    <div className="rounded-xl border border-slate-100 bg-slate-50/80 py-3 px-3 transition duration-200 hover:border-slate-200 hover:bg-slate-50 dark:border-navy-800 dark:bg-navy-800/50 dark:hover:bg-navy-800/80">
       <p className="text-xs text-slate-400 dark:text-navy-400">{label}</p>
       <p className="mt-0.5 text-lg font-bold tabular-nums text-slate-800 dark:text-navy-50">
         {value != null ? (
@@ -307,7 +330,7 @@ function TrainStat({
   icon?: React.ReactNode;
 }) {
   return (
-    <div className="rounded-xl bg-slate-50 py-3 dark:bg-navy-800/60">
+    <div className="rounded-xl border border-slate-100 bg-slate-50/80 py-3 transition duration-200 hover:bg-slate-50 dark:border-navy-800 dark:bg-navy-800/50">
       <p className="flex items-center justify-center gap-1 text-xs text-slate-400 dark:text-navy-400">
         {icon}
         {label}

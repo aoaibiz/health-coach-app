@@ -1,9 +1,17 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAuth } from "./AuthProvider";
 import { AuthApiError, googleStartUrl } from "@/lib/authApi";
 import { reduceRegistered, type AuthScreenMode } from "@/lib/authState";
+
+const OAUTH_ERROR_MESSAGES: Record<string, string> = {
+  "google-cancelled": "Googleログインがキャンセルされました。もう一度お試しください。",
+  "google-expired": "Googleログインの有効期限が切れました。もう一度お試しください。",
+  "google-link-required":
+    "このGoogleメールは既にパスワード登録済みです。メール/パスワードでログインしてください。",
+  "google-failed": "Googleログインに失敗しました。もう一度お試しください。",
+};
 
 /**
  * The unauthenticated shell: login + 会員登録 screens (white/navy theme).
@@ -13,9 +21,9 @@ import { reduceRegistered, type AuthScreenMode } from "@/lib/authState";
  *    "登録しました。ログインしてください".
  *  - login → POST /auth/login → on 200 the AuthProvider enters the authed state
  *    and this screen unmounts (the gate swaps in the app / chat-home).
- *  - Googleでログイン → full-page nav to /auth/google/start. While the OAuth
- *    client secret isn't set the endpoint 503s, so we probe it first and show
- *    "現在準備中" instead of bouncing the user to an error page.
+ *  - Googleでログイン → full-page nav to /auth/google/start. OAuth is deliberately
+ *    a top-level navigation, not a probe fetch, so mobile Safari cannot lose the
+ *    redirect/cookie flow.
  */
 export function AuthScreen() {
   const { login, register } = useAuth();
@@ -26,6 +34,21 @@ export function AuthScreen() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [googleNote, setGoogleNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const authError = params.get("authError");
+    if (!authError) return;
+
+    setError(OAUTH_ERROR_MESSAGES[authError] ?? OAUTH_ERROR_MESSAGES["google-failed"]);
+    params.delete("authError");
+    const qs = params.toString();
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash}`,
+    );
+  }, []);
 
   function switchMode(next: AuthScreenMode) {
     setMode(next);
@@ -50,13 +73,17 @@ export function AuthScreen() {
         await register(mail, password);
         // 202: no auto-login → flip to the login screen with a heads-up.
         setMode(reduceRegistered());
-        setNotice("登録しました。ログインしてください");
+        setNotice("登録を受け付けました。既に登録済みの場合、パスワードは変更されません。ログインしてください。");
         setPassword("");
       } else {
         await login(mail, password);
         // On success the provider enters "authed" and this component unmounts.
       }
     } catch (err) {
+      if (err instanceof AuthApiError && err.status === 401) {
+        setError("メールアドレスかパスワードが違います。Googleで登録した方は「Googleでログイン」を使ってください。");
+        return;
+      }
       setError(
         err instanceof AuthApiError
           ? err.message
@@ -67,34 +94,13 @@ export function AuthScreen() {
     }
   }
 
-  async function handleGoogle() {
+  function handleGoogle() {
     setGoogleNote(null);
     setError(null);
-    try {
-      // Probe first: the endpoint redirects (or 503s until the secret is set).
-      // `redirect: "manual"` keeps us on this page so we can read the status.
-      const res = await fetch(googleStartUrl(), {
-        method: "GET",
-        credentials: "include",
-        redirect: "manual",
-      });
-      // opaqueredirect (status 0 / type "opaqueredirect") = the real redirect to
-      // Google happened → follow it. A 503 = not configured yet.
-      if (res.type === "opaqueredirect" || res.status === 0 || (res.status >= 300 && res.status < 400)) {
-        window.location.href = googleStartUrl();
-        return;
-      }
-      if (res.status === 503) {
-        setGoogleNote("Googleログインは現在準備中です");
-        return;
-      }
-      // Any other 2xx/4xx: just navigate and let the backend decide.
-      window.location.href = googleStartUrl();
-    } catch {
-      // Network hiccup → let a plain navigation try (also covers strict CORS on
-      // the probe). If it 503s the destination shows準備中 server-side too.
-      window.location.href = googleStartUrl();
-    }
+    setGoogleNote("Googleログインへ移動します…");
+    // OAuth must be a plain top-level navigation. A probe fetch is brittle on
+    // mobile Safari and consumes an OAuth state before the real navigation.
+    window.location.assign(googleStartUrl());
   }
 
   const isRegister = mode === "register";
@@ -103,14 +109,21 @@ export function AuthScreen() {
     <div className="relative flex h-[100dvh] flex-col justify-center overflow-hidden px-6 py-10">
       {/* full-bleed background photo */}
       {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src="/login-bg.jpg" alt="" aria-hidden className="absolute inset-0 -z-20 h-full w-full object-cover" />
-      {/* scrim for legibility (darkens the photo so the glass card pops) */}
-      <div aria-hidden className="absolute inset-0 -z-10 bg-gradient-to-b from-black/40 via-black/25 to-black/60" />
+      <img src="/login-bg.jpg" alt="" aria-hidden className="absolute inset-0 -z-20 h-full w-full scale-105 object-cover" />
+      {/* scrim for legibility (darkens the photo so the glass card pops) +
+          a faint accent glow from the top so the brand colour bleeds in. */}
+      <div aria-hidden className="absolute inset-0 -z-10 bg-gradient-to-b from-black/45 via-black/30 to-black/65" />
+      <div aria-hidden className="absolute -top-32 left-1/2 -z-10 h-72 w-72 -translate-x-1/2 rounded-full bg-accent/30 blur-[100px]" />
       {/* centered card */}
-      <div className="mx-auto w-full max-w-md">
-        <div className="rounded-3xl border border-white/40 bg-white/90 p-6 shadow-2xl backdrop-blur-2xl dark:border-white/10 dark:bg-navy-900/85">
+      <div className="mx-auto w-full max-w-md animate-fade-in-up">
+        <div className="rounded-[1.75rem] border border-white/40 bg-white/90 p-7 shadow-2xl ring-1 ring-black/5 backdrop-blur-2xl dark:border-white/10 dark:bg-navy-900/85">
           <header className="mb-6 text-center">
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-navy-50">
+          <span className="mb-4 inline-flex h-14 w-14 items-center justify-center rounded-[1.1rem] bg-gradient-to-br from-accent-light to-accent-dark text-white shadow-glow-accent" aria-hidden>
+            <svg viewBox="0 0 24 24" className="h-8 w-8" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20.5 6.5c-1.8 6.5-6 9.5-9.5 11C8 18 5 17 4 13.5 7 14 9 12.5 9.5 10c.4-2 .2-3.8 1.5-5.5C13 7 16.5 6 20.5 6.5z" />
+            </svg>
+          </span>
+          <h1 className="text-[1.7rem] font-bold tracking-tight text-slate-900 dark:text-navy-50">
             Health
           </h1>
           <p className="mt-1.5 text-sm text-slate-500 dark:text-navy-300">

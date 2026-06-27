@@ -6,7 +6,9 @@ import { CoachAvatar } from "@/components/chat/CoachAvatar";
 import { MessageText } from "@/components/chat/MessageText";
 import { UserAvatar } from "@/components/chat/UserAvatar";
 import { useChat } from "@/components/chat/ChatProvider";
+import { useSelectedDate } from "@/components/SelectedDateProvider";
 import { coachDisplayName, type CoachSettings } from "@/lib/coachSettings";
+import { toDateKey } from "@/lib/date";
 import {
   CameraIcon,
   CloseIcon,
@@ -57,9 +59,11 @@ function BubblePhoto({ photoId, compact = false }: { photoId: string; compact?: 
 
 /** Chip shown under the assistant bubble when this turn auto-logged a meal. */
 function LoggedMealChip() {
+  const { setDate } = useSelectedDate();
   return (
     <Link
       href="/meal"
+      onClick={() => setDate(toDateKey())}
       className="mt-1.5 inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 transition active:scale-95 hover:bg-emerald-200 dark:bg-emerald-400/15 dark:text-emerald-300"
     >
       <MealIcon className="h-3.5 w-3.5" />
@@ -70,13 +74,31 @@ function LoggedMealChip() {
 
 /** Chip shown under the assistant bubble when this turn auto-logged a workout. */
 function LoggedWorkoutChip() {
+  const { setDate } = useSelectedDate();
   return (
     <Link
       href="/workout"
+      onClick={() => setDate(toDateKey())}
       className="mt-1.5 inline-flex items-center gap-1.5 rounded-full bg-sky-100 px-2.5 py-1 text-[11px] font-semibold text-sky-700 transition active:scale-95 hover:bg-sky-200 dark:bg-sky-400/15 dark:text-sky-300"
     >
       <DumbbellIcon className="h-3.5 w-3.5" />
       運動を記録しました（タップで確認・編集）
+    </Link>
+  );
+}
+
+/** Chip shown under the assistant bubble when this turn PLANNED a workout menu
+ *  (AIプランナー 第2陣C). Links to 運動 where each planned 種目 has a 完了 button. */
+function PlannedWorkoutChip() {
+  const { setDate } = useSelectedDate();
+  return (
+    <Link
+      href="/workout"
+      onClick={() => setDate(toDateKey())}
+      className="mt-1.5 inline-flex items-center gap-1.5 rounded-full bg-accent/10 px-2.5 py-1 text-[11px] font-semibold text-accent transition active:scale-95 hover:bg-accent/20 dark:bg-accent/20 dark:text-accent-light"
+    >
+      <DumbbellIcon className="h-3.5 w-3.5" />
+      運動メニューを予定に入れました（タップして確認・完了）
     </Link>
   );
 }
@@ -130,6 +152,7 @@ function Bubble({
       </div>
       {message.loggedMeal && <div className="pl-10">{<LoggedMealChip />}</div>}
       {message.loggedWorkout && <div className="pl-10">{<LoggedWorkoutChip />}</div>}
+      {message.plannedWorkout && <div className="pl-10">{<PlannedWorkoutChip />}</div>}
     </div>
   );
 }

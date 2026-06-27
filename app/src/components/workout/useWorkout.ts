@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { loadWorkouts, saveWorkouts } from "@/lib/storage";
+import { DATA_CHANGED_EVENT, recordDeletion } from "@/lib/syncData";
 import { shiftDateKey } from "@/lib/date";
 import type { Exercise, Workout } from "@/lib/types";
 
@@ -17,8 +18,21 @@ export function useWorkout(date: string) {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    setStore(loadWorkouts());
+    const refresh = () => setStore(loadWorkouts());
+    refresh();
     setReady(true);
+    // Re-read on another tab's write (`storage`), tab focus, or the cross-device
+    // live-pull / login-merge writing in THIS tab (DATA_CHANGED_EVENT — the
+    // same-document `storage` event does not fire). Lets a workout logged on
+    // another device appear here without a reload.
+    window.addEventListener("storage", refresh);
+    window.addEventListener("focus", refresh);
+    window.addEventListener(DATA_CHANGED_EVENT, refresh);
+    return () => {
+      window.removeEventListener("storage", refresh);
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener(DATA_CHANGED_EVENT, refresh);
+    };
   }, []);
 
   const workout = store[date] ?? emptyWorkout(date);
@@ -59,7 +73,14 @@ export function useWorkout(date: string) {
     [setExercises],
   );
   const removeExercise = useCallback(
-    (id: string) => setExercises((prev) => prev.filter((e) => e.id !== id)),
+    (id: string) => {
+      // Tombstone FIRST (before setExercises → saveWorkouts → push) so the
+      // merge-push's reconcile sees the tombstone and excludes the exercise
+      // instead of re-adding it. Makes the delete stick across the union +
+      // propagate to other devices.
+      recordDeletion("workouts", id);
+      setExercises((prev) => prev.filter((e) => e.id !== id));
+    },
     [setExercises],
   );
 

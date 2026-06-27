@@ -5,6 +5,8 @@
 // re-entering a day updates it.
 
 import { toDateKey } from "./date";
+import { clearTombstones } from "./deletionsStore";
+import { pushSectionBestEffort } from "./syncData";
 
 /** A single day's recorded body weight. */
 export interface WeightEntry {
@@ -356,6 +358,16 @@ export function saveWeightLog(entries: WeightEntry[]): void {
     );
   } catch {
     /* quota/serialization errors are non-fatal */
+  }
+  // A re-logged date supersedes any old tombstone for that date (weightLog ids are
+  // the reused date), so re-entering a deleted day isn't re-suppressed by the
+  // merge. When a tombstone was actually revived, push BOTH the cleared op and the
+  // weightLog so another device doesn't keep the old `deleted` op and re-suppress
+  // the re-logged day (Codex review). No-op for a sync write of the excluded union.
+  const revived = clearTombstones("weightLog", entries.map((e) => e.date).filter(Boolean));
+  if (revived) {
+    pushSectionBestEffort("deletions");
+    pushSectionBestEffort("weightLog");
   }
 }
 

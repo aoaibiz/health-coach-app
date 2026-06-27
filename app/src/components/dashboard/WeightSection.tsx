@@ -12,6 +12,7 @@ import {
 import { toDateKey } from "@/lib/date";
 import { WeightTrendChart } from "@/components/dashboard/WeightTrendChart";
 import { ChartIcon } from "@/components/icons";
+import { DATA_CHANGED_EVENT } from "@/lib/syncData";
 
 interface Props {
   /** Target weight from the profile, if the owner has set one. */
@@ -44,9 +45,13 @@ export function WeightSection({ targetWeightKg }: Props) {
     const refresh = () => setEntries(loadWeightLog());
     window.addEventListener("focus", refresh);
     window.addEventListener("storage", refresh);
+    // In-tab login restore writes localStorage without a `storage` event; listen
+    // for the same-document signal so the weight log shows right after login.
+    window.addEventListener(DATA_CHANGED_EVENT, refresh);
     return () => {
       window.removeEventListener("focus", refresh);
       window.removeEventListener("storage", refresh);
+      window.removeEventListener(DATA_CHANGED_EVENT, refresh);
     };
   }, []);
 

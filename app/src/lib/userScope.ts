@@ -4,37 +4,38 @@
 // photos), addressed by fixed keys that are NOT namespaced per user. The auth layer
 // only ever cleared the auth STATE on logout, never the data. So on a shared
 // browser:
-//   user A logs in → enters data (profile/meals/chat/…) → logs out (data stays in
-//   localStorage) → user B registers/logs in → the app mounts against A's leftover
-//   local data → B SEES A's data.  ← the privacy bug.
+//   user A logs in → enters data → logs out (data stays in localStorage) →
+//   user B registers/logs in → mergeOnLogin UNIONs B's (empty) server data with
+//   A's leftover local data → B SEES A's data.  ← the privacy bug.
 //
 // THE FIX (data ownership at the user boundary):
 //   - Track the last user bound to this browser (`health-app:lastUserId`).
-//   - On login, if the user CHANGED (≠ lastUserId) → wipe ALL local user data so
-//     nothing from the previous user can surface for the new user.
+//   - On login, if the user CHANGED (≠ lastUserId) → wipe ALL local user data
+//     BEFORE the merge, so nothing from the previous user can union in. Then the
+//     merge pulls THIS user's server data fresh.
 //   - On logout → wipe ALL local user data, so the next person on a shared device
 //     starts clean.
 //   - Same user continuing (== lastUserId) or first-ever login on this browser
-//     (no lastUserId) → DO NOT wipe; the user keeps their own offline-created data.
+//     (no lastUserId) → DO NOT wipe; the existing union/merge protects the user's
+//     own offline-created data (this is the wipe-fuse / pre-login bind path).
 //
 // This is the ONLY place that enumerates the user-data keys, so a future section
 // can't be forgotten: add its key to USER_DATA_KEYS and it's cleared everywhere.
-//
-// NOTE: this app stores user data LOCAL-ONLY (no cross-device server sync), so the
-// fix is a straight wipe — there is no server merge to sequence against.
 //
 // SSR-safe: every function is a no-op when `window` is absent.
 
 import type { AuthUser } from "./authState";
 import { API_TOKEN_STORAGE_KEY } from "./analyzeMeal";
+import { API_TOKEN_UPDATED_AT_KEY } from "./apiTokenStore";
 import { COACH_SETTINGS_KEY } from "./coachSettings";
 import { WEIGHT_LOG_STORAGE_KEY } from "./weightLog";
 import { CHAT_STORAGE_KEY } from "./chatStore";
 import { SELECTED_DATE_KEY } from "./selectedDate";
+import { DELETIONS_STORAGE_KEY } from "./deletionsStore";
 
 /** localStorage key recording the user currently bound to THIS browser, so a
- *  login by a DIFFERENT user can be detected and the previous user's data wiped.
- *  Value is the identity key from `userIdentityKey`. */
+ *  login by a DIFFERENT user can be detected and the previous user's data wiped
+ *  before the merge. Value is the identity key from `userIdentityKey`. */
 export const LAST_USER_ID_KEY = "health-app:lastUserId";
 
 // The fixed (un-namespaced) localStorage keys that hold USER DATA. Re-declared
@@ -65,8 +66,13 @@ export const USER_DATA_KEYS: readonly string[] = [
   COACH_SETTINGS_KEY,
   CHAT_STORAGE_KEY,
   API_TOKEN_STORAGE_KEY,
+  API_TOKEN_UPDATED_AT_KEY,
   SLEEP_KEY,
   SELECTED_DATE_KEY,
+  // Delete tombstones are per-user data too — they MUST be wiped on logout /
+  // account-switch, else a previous user's tombstones merge into the next user's
+  // sync and could suppress same-id records (Codex review: cross-account leak).
+  DELETIONS_STORAGE_KEY,
 ];
 
 /** IndexedDB database + store that hold meal/avatar photo BLOBs (photoStore.ts).
@@ -79,11 +85,11 @@ const PHOTO_STORE = "photos";
  * Derive a STABLE per-user identity key from the auth user object, used to detect
  * "is this the same user as last time on this browser?".
  *
- * Robust to the API's response SHAPE: authApi splits `{ csrfToken, ...user }` from
- * the login/me response, so `state.user` is normally the flat `{ id, email, … }`.
- * We still also look at a nested `.user` in case a backend returns the fields
- * NESTED, preferring a stable `id` over `email`. Returns "" when no identity can be
- * derived (treated as "unknown user").
+ * Robust to unexpected response SHAPES: the normal client stores user fields at
+ * the top level, but older/malformed sessions may still carry `{ user: { id,
+ * email } }`. We therefore look at BOTH the top level and a nested `.user`,
+ * preferring a stable `id` over `email`.
+ * Returns "" when no identity can be derived (treated as "unknown user").
  */
 export function userIdentityKey(user: AuthUser | null | undefined): string {
   if (!user || typeof user !== "object") return "";
@@ -103,26 +109,6 @@ export function userIdentityKey(user: AuthUser | null | undefined): string {
 
 function pickString(v: unknown): string {
   return typeof v === "string" && v.trim() !== "" ? v.trim() : "";
-}
-
-/**
- * True if ANY user-data key currently exists in localStorage. Used to fail closed
- * when the authed user's identity can't be derived (no id/email) AND there is no
- * recorded `lastUserId` to match against: if leftover user data exists we cannot
- * prove it belongs to this session's user, so the caller wipes rather than expose
- * it. Covers the pre-fix-upgrade path (data on disk, lastUserId never recorded).
- * SSR-safe: false when `window` is absent.
- */
-export function hasAnyUserData(): boolean {
-  if (typeof window === "undefined") return false;
-  for (const key of USER_DATA_KEYS) {
-    try {
-      if (window.localStorage.getItem(key) != null) return true;
-    } catch {
-      /* storage unavailable → treat as no data */
-    }
-  }
-  return false;
 }
 
 /** Read the user bound to this browser, or null when none is recorded. */
@@ -159,10 +145,10 @@ export function clearLastUserId(): void {
 
 /**
  * Remove EVERY user-data localStorage key (USER_DATA_KEYS) AND every photo blob
- * in IndexedDB. Used when a DIFFERENT user logs in and on logout. NEVER touches
- * the theme preference or the lastUserId bookkeeping key (the caller manages
- * lastUserId explicitly). Best-effort + never throws — a partial clear must not
- * crash the auth flow.
+ * in IndexedDB. Used when a DIFFERENT user logs in (before the merge) and on
+ * logout. NEVER touches the theme preference or the lastUserId bookkeeping key
+ * (the caller manages lastUserId explicitly). Best-effort + never throws — a
+ * partial clear must not crash the auth flow.
  *
  * Returns a promise that resolves once the IndexedDB clear settles; the
  * localStorage portion is synchronous (done before the await) so callers that
@@ -171,7 +157,7 @@ export function clearLastUserId(): void {
 export async function clearAllLocalData(): Promise<void> {
   if (typeof window === "undefined") return;
   // 1) localStorage — synchronous, do it first so any immediately-following read
-  //    sees an empty section.
+  //    (e.g. mergeOnLogin's readLocal) sees an empty section.
   for (const key of USER_DATA_KEYS) {
     try {
       window.localStorage.removeItem(key);
@@ -180,7 +166,7 @@ export async function clearAllLocalData(): Promise<void> {
     }
   }
   // 2) IndexedDB photos (meal + avatar blobs). Best-effort; await so the caller
-  //    can sequence after a complete wipe.
+  //    can sequence a merge after a complete wipe.
   try {
     await clearPhotoStore();
   } catch {

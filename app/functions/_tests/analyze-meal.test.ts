@@ -409,57 +409,43 @@ describe("handleAnalyzeMeal — failure / offline path", () => {
     expect((data as Record<string, unknown>).items).toBeUndefined();
   });
 
-  // ---- Active CF Pages Functions entry (member self-host deploy) -----------
-  // onRequestPost is now ACTIVE (member's own Cloudflare deploy). It is gated by
-  // X-Health-App-Token vs the deploy's APP_ACCESS_TOKEN. These tests cover the
-  // gate, which short-circuits BEFORE any provider is built — so no CLI/network.
-
-  function postWithToken(body: unknown, token?: string): Request {
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (token !== undefined) headers["x-health-app-token"] = token;
-    return new Request("https://example.test/api/analyze-meal", {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
-  }
-
-  it("CF entry fails closed with 503 when APP_ACCESS_TOKEN is unset", async () => {
+  it("returns a clean 410 when the legacy CF Pages function is called", async () => {
     const res = await onRequestPost({
-      request: postWithToken({ text: "ごはん" }, "anything"),
+      request: post({ text: "ごはん" }),
       env: {},
     });
-    expect(res.status).toBe(503);
-    const data = (await res.json()) as { error?: string };
-    expect(data.error).toBe("analysis_unavailable");
+    expect(res.status).toBe(410);
+    const data = (await res.json()) as { error?: string; message?: string };
+    expect(data.error).toBe("disabled");
+    expect(data.message).toContain("Codex");
+  });
+});
+
+describe("handleAnalyzeMeal — mode passthrough (Phase2: 冷蔵庫の写真→献立)", () => {
+  /** A provider that records the mode it was called with. */
+  class ModeRecordingProvider implements MealVisionProvider {
+    public lastMode: AnalyzeInput["mode"] | "absent" = "absent";
+    async analyzeMeal(input: AnalyzeInput): Promise<AnalyzeResult> {
+      this.lastMode = "mode" in input ? input.mode : "absent";
+      return { dishes: [{ name: "卵", grams: 50, confidence: "high" }], generatedBy: "test" };
+    }
+  }
+
+  it("forwards mode:'fridge' to the provider", async () => {
+    const provider = new ModeRecordingProvider();
+    await handleAnalyzeMeal(post({ imageBase64: "ZmFrZQ==", mode: "fridge" }), provider);
+    expect(provider.lastMode).toBe("fridge");
   });
 
-  it("CF entry returns 401 when the token does not match APP_ACCESS_TOKEN", async () => {
-    const res = await onRequestPost({
-      request: postWithToken({ text: "ごはん" }, "wrong"),
-      env: { APP_ACCESS_TOKEN: "right" },
-    });
-    expect(res.status).toBe(401);
-    const data = (await res.json()) as { error?: string };
-    expect(data.error).toBe("unauthorized");
+  it("defaults to mode:'meal' when no mode (every existing caller unaffected)", async () => {
+    const provider = new ModeRecordingProvider();
+    await handleAnalyzeMeal(post({ text: "ごはん" }), provider);
+    expect(provider.lastMode).toBe("meal");
   });
 
-  it("CF entry returns 401 when no token header is sent", async () => {
-    const res = await onRequestPost({
-      request: postWithToken({ text: "ごはん" }),
-      env: { APP_ACCESS_TOKEN: "right" },
-    });
-    expect(res.status).toBe(401);
-  });
-
-  it("CF entry returns 503 for AI_MODE=own with an unsupported provider (misconfig)", async () => {
-    const res = await onRequestPost({
-      request: postWithToken({ text: "ごはん" }, "right"),
-      env: { APP_ACCESS_TOKEN: "right", AI_MODE: "own", AI_PROVIDER: "bogus" },
-    });
-    // makeMealProvider throws → mapped to analysis_unavailable, never fabricates.
-    expect(res.status).toBe(503);
-    const data = (await res.json()) as { error?: string };
-    expect(data.error).toBe("analysis_unavailable");
+  it("a garbage mode falls back to 'meal' (never breaks the call)", async () => {
+    const provider = new ModeRecordingProvider();
+    await handleAnalyzeMeal(post({ text: "ごはん", mode: "bogus" }), provider);
+    expect(provider.lastMode).toBe("meal");
   });
 });

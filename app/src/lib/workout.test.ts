@@ -176,3 +176,40 @@ describe("formatNumber", () => {
     expect(formatNumber(1234.6)).toBe("1,235");
   });
 });
+
+describe("planned exclusion (AIプランナー 第2陣C) — a plan is intent, not 成果", () => {
+  // A weighted lift logged DONE vs the SAME lift left PLANNED. Only the done one
+  // counts toward 種目数/総挙上量/総回数; absent status = done (back-compat).
+  const doneLift = ex({ name: "ベンチプレス", sets: 1, reps: 30, weight: 60 }); // vol 1800
+  const plannedLift = ex({
+    name: "デッドリフト",
+    sets: 1,
+    reps: 5,
+    weight: 100,
+    status: "planned",
+  });
+
+  it("totalVolume / totalReps / exerciseCount count DONE only", () => {
+    const mixed = [doneLift, plannedLift];
+    // Done bench: 1×30×60 = 1800. Planned deadlift excluded.
+    expect(totalVolume(mixed)).toBe(1800);
+    expect(totalReps(mixed)).toBe(30); // 30 done reps; planned 5 excluded
+    expect(exerciseCount(mixed)).toBe(1); // only the done one is a 種目
+    expect(weightedExerciseCount(mixed)).toBe(1);
+  });
+
+  it("absent status behaves exactly like before (done) — back-compat", () => {
+    expect(totalVolume([doneLift])).toBe(1800);
+    expect(exerciseCount([doneLift])).toBe(1);
+  });
+
+  it("a planned-only day shows zero 成果 until completed", () => {
+    expect(exerciseCount([plannedLift])).toBe(0);
+    expect(totalVolume([plannedLift])).toBe(0);
+    expect(totalReps([plannedLift])).toBe(0);
+    // Flipping it done makes it count.
+    const done = { ...plannedLift, status: "done" as const };
+    expect(exerciseCount([done])).toBe(1);
+    expect(totalVolume([done])).toBe(500); // 100×5
+  });
+});

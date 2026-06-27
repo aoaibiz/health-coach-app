@@ -11,6 +11,15 @@ import {
   formatTranscript,
   AUTO_LOG_PROTOCOL,
   WORKOUT_LOG_PROTOCOL,
+  WORKOUT_PLAN_PROTOCOL,
+  WORKOUT_PLAN_OPEN,
+  WORKOUT_PLAN_CLOSE,
+  MEAL_PLAN_PROTOCOL,
+  MEAL_PLAN_OPEN,
+  MEAL_PLAN_CLOSE,
+  CALENDAR_PLAN_PROTOCOL,
+  CALENDAR_PLAN_OPEN,
+  CALENDAR_PLAN_CLOSE,
   TIME_AWARENESS_GUIDE,
   PROFILE_AWARENESS_GUIDE,
   COACH_EXPERTISE,
@@ -54,6 +63,8 @@ function expectSafetyFloorIntact(prompt: string) {
   expect(prompt).toContain(EXPERTISE_MARKER);
   expect(prompt).toContain(AUTO_LOG_PROTOCOL);
   expect(prompt).toContain(WORKOUT_LOG_PROTOCOL);
+  expect(prompt).toContain(WORKOUT_PLAN_PROTOCOL);
+  expect(prompt).toContain(MEAL_PLAN_PROTOCOL);
   expect(prompt).toContain(TIME_AWARENESS_GUIDE);
   expect(prompt).toContain(PROFILE_AWARENESS_GUIDE);
   expect(prompt).toContain(MEAL_PROTOCOL_MARKER);
@@ -73,6 +84,118 @@ describe("auto-log protocols COUPLE the prose claim to the block (Task 1 — rec
     const prompt = buildChatPrompt(TURNS);
     expect(prompt).toContain("記録の整合性");
     expect(prompt).toContain("必ずブロックを付けること");
+  });
+});
+
+describe("meal auto-log nutrition accuracy protocol", () => {
+  it("carries portion_basis and nutrient anchors for label/estimate items", () => {
+    expect(AUTO_LOG_PROTOCOL).toContain("portion_basis");
+    expect(AUTO_LOG_PROTOCOL).toContain("kcal");
+    expect(AUTO_LOG_PROTOCOL).toContain("protein_g");
+    expect(AUTO_LOG_PROTOCOL).toContain("label/estimate");
+  });
+
+  it("prevents unstated protein foods from being saved as tiny guessed grams", () => {
+    expect(AUTO_LOG_PROTOCOL).toContain("鶏むね肉");
+    expect(AUTO_LOG_PROTOCOL).toContain("5〜20g");
+    expect(AUTO_LOG_PROTOCOL).toContain("標準分量");
+    expect(AUTO_LOG_PROTOCOL).not.toContain("0 や空（省略）は禁止");
+  });
+
+  it("keeps ambiguous compound dishes from masquerading as complete 公式DB meals", () => {
+    expect(AUTO_LOG_PROTOCOL).toContain("豚バラ野菜炒め");
+    expect(AUTO_LOG_PROTOCOL).toContain("一部の具だけを小さくDB化");
+    expect(AUTO_LOG_PROTOCOL).toContain('source:"estimate"');
+  });
+});
+
+describe("WORKOUT_PLAN protocol (chat→運動メニュー提案, AIプランナー 第2陣C)", () => {
+  it("is present in the built prompt with its sentinel markers", () => {
+    const prompt = buildChatPrompt(TURNS);
+    expect(prompt).toContain(WORKOUT_PLAN_PROTOCOL);
+    expect(prompt).toContain(WORKOUT_PLAN_OPEN);
+    expect(prompt).toContain(WORKOUT_PLAN_CLOSE);
+    // The final instruction line offers the plan block as an option.
+    expect(prompt).toContain("これからやる運動メニューの提案");
+  });
+
+  it("ACTIVE dialogue: the coach asks the start time FIRST, never plans blind", () => {
+    expect(WORKOUT_PLAN_PROTOCOL).toContain("何時から始めますか");
+    expect(WORKOUT_PLAN_PROTOCOL).toContain("いきなりメニューを作らない");
+  });
+
+  it("grounds the plan in the user's recent data + goals", () => {
+    expect(WORKOUT_PLAN_PROTOCOL).toContain("直近の運動データ");
+    expect(WORKOUT_PLAN_PROTOCOL).toContain("目標");
+  });
+
+  it("inserts as a PLAN (planned), not a done log — anti-fabrication", () => {
+    // The plan must say it's 予定 (planned) and not count until 完了, and must not
+    // claim the workout was DONE.
+    expect(WORKOUT_PLAN_PROTOCOL).toContain("予定");
+    expect(WORKOUT_PLAN_PROTOCOL).toContain("完了");
+    expect(WORKOUT_PLAN_PROTOCOL).toContain("捏造防止");
+  });
+
+  it("forbids inventing a session time + couples the claim to the block", () => {
+    expect(WORKOUT_PLAN_PROTOCOL).toContain("時刻を勝手に捏造しない");
+    expect(WORKOUT_PLAN_PROTOCOL).toContain("タイムゾーン付きのISO8601");
+    expect(WORKOUT_PLAN_PROTOCOL).toContain("整合性");
+    expect(WORKOUT_PLAN_PROTOCOL).toContain("必ずブロックを付けること");
+  });
+
+  it("does NOT weaken the safety floor or the other protocols", () => {
+    const prompt = buildChatPrompt(TURNS);
+    expectSafetyFloorIntact(prompt);
+  });
+});
+
+describe("MEAL_PLAN protocol (chat→食事メニュー提案, AIプランナー 第3陣D)", () => {
+  it("is present in the built prompt with its sentinel markers", () => {
+    const prompt = buildChatPrompt(TURNS);
+    expect(prompt).toContain(MEAL_PLAN_PROTOCOL);
+    expect(prompt).toContain(MEAL_PLAN_OPEN);
+    expect(prompt).toContain(MEAL_PLAN_CLOSE);
+    // The final instruction line offers the meal-plan block as an option.
+    expect(prompt).toContain("これから食べる献立の提案");
+  });
+
+  it("plans 朝/昼/夕 grounded in the user's goal kcal/PFC (not blind)", () => {
+    expect(MEAL_PLAN_PROTOCOL).toContain("今日の献立");
+    expect(MEAL_PLAN_PROTOCOL).toContain("目標カロリー");
+    expect(MEAL_PLAN_PROTOCOL).toContain("PFC");
+  });
+
+  it("inserts as a PLAN (planned), not an eaten log — anti-fabrication (twin of 運動)", () => {
+    // Must say it's 予定 (planned), wait for the 「食べた」 button before counting,
+    // and not claim the meal was EATEN.
+    expect(MEAL_PLAN_PROTOCOL).toContain("予定");
+    expect(MEAL_PLAN_PROTOCOL).toContain("食べた");
+    expect(MEAL_PLAN_PROTOCOL).toContain("捏造防止");
+    expect(MEAL_PLAN_PROTOCOL).toContain("食べたことにしない");
+  });
+
+  it("keeps the grounding floor: 標準食材に分解 + 写ってない物は足さない", () => {
+    expect(MEAL_PLAN_PROTOCOL).toContain("標準食材に分解");
+    expect(MEAL_PLAN_PROTOCOL).toContain("勝手に足さない");
+  });
+
+  it("recipe card + shopping list (買い物リスト⑤) framing, without fabrication", () => {
+    expect(MEAL_PLAN_PROTOCOL).toContain("レシピカード");
+    expect(MEAL_PLAN_PROTOCOL).toContain("買い物リスト");
+    expect(MEAL_PLAN_PROTOCOL).toContain("onHand");
+    expect(MEAL_PLAN_PROTOCOL).toContain("推測で増やさない");
+  });
+
+  it("forbids inventing a meal time + couples the claim to the block", () => {
+    expect(MEAL_PLAN_PROTOCOL).toContain("時刻を勝手に捏造しない");
+    expect(MEAL_PLAN_PROTOCOL).toContain("タイムゾーン付きのISO8601");
+    expect(MEAL_PLAN_PROTOCOL).toContain("整合性");
+    expect(MEAL_PLAN_PROTOCOL).toContain("必ずブロックを付けること");
+  });
+
+  it("does NOT weaken the safety floor or the other protocols", () => {
+    expectSafetyFloorIntact(buildChatPrompt(TURNS));
   });
 });
 
@@ -345,6 +468,22 @@ describe("sleep + recent-days context (Features ① + ②)", () => {
     expect(out).toContain("└ [夕食] 角ハイボール350g"); // 実品目が prompt に届く(slotラベルは夕→夕食)
   });
 
+  it("formatRecentDays renders workout item detail and full sleep detail", () => {
+    const out = formatRecentDays([
+      {
+        label: "6月26日(金)",
+        burnKcal: 174,
+        exerciseCount: 10,
+        workouts: ["ブルガリアンスクワット ×10 ×3セット", "腹筋 ×100 ×3セット"],
+        sleep: "7時間40分",
+        sleepDetail: "23:30→07:10（7時間40分）",
+      },
+    ]);
+    expect(out).not.toBeNull();
+    expect(out).toContain("6月26日(金): 運動174kcal(10種目) / 睡眠 23:30→07:10（7時間40分）");
+    expect(out).toContain("└ 運動: ブルガリアンスクワット ×10 ×3セット / 腹筋 ×100 ×3セット");
+  });
+
   it("the recent-days digest appears in the context block", () => {
     const block = formatChatContext({
       recentDays: [{ label: "6月20日(金)", intakeKcal: 1800, mealCount: 3 }],
@@ -356,6 +495,8 @@ describe("sleep + recent-days context (Features ① + ②)", () => {
   it("the time-awareness guide tells the coach it CAN log a past day on request", () => {
     const prompt = buildChatPrompt(TURNS);
     expect(prompt).toContain("過去の日付を指定して記録");
+    expect(prompt).toContain("直近の日別ログ");
+    expect(prompt).toContain("中身までは見えない」と言わない");
     // And the safety floor is unchanged.
     expectSafetyFloorIntact(prompt);
   });
@@ -419,5 +560,32 @@ describe("拡張② — sleep auto-log protocol + computed energy (BMR/TDEE) in 
   it("omits the energy line when neither BMR nor TDEE is provided (no fabrication)", () => {
     const block = formatChatContext({ goal: "減量" } as ChatContext);
     expect(block).not.toContain("推定エネルギー");
+  });
+});
+
+describe("CALENDAR_PLAN protocol (chat→Googleカレンダー)", () => {
+  it("includes the calendar-plan protocol block + sentinel markers in the built prompt", () => {
+    const prompt = buildChatPrompt(TURNS);
+    expect(prompt).toContain(CALENDAR_PLAN_PROTOCOL);
+    expect(prompt).toContain("【Googleカレンダーへの予定登録について】");
+    expect(prompt).toContain(CALENDAR_PLAN_OPEN);
+    expect(prompt).toContain(CALENDAR_PLAN_CLOSE);
+  });
+
+  it("the final instruction lists the calendar block as an allowed appendix", () => {
+    const prompt = buildChatPrompt(TURNS);
+    expect(prompt).toContain("«CALENDAR_PLAN»…«/CALENDAR_PLAN»");
+  });
+
+  it("requires zone-aware ISO times + forbids inventing a time (anti-fabrication)", () => {
+    expect(CALENDAR_PLAN_PROTOCOL).toContain("タイムゾーン付きのISO8601");
+    expect(CALENDAR_PLAN_PROTOCOL).toContain("時刻を勝手に捏造しない");
+    // Couples the "登録した" prose claim to actually emitting the block (integrity).
+    expect(CALENDAR_PLAN_PROTOCOL).toContain("整合性");
+    expect(CALENDAR_PLAN_PROTOCOL).toContain("必ずブロックを付けること");
+  });
+
+  it("does NOT weaken the existing safety floor (all guardrails + log protocols intact)", () => {
+    expectSafetyFloorIntact(buildChatPrompt(TURNS));
   });
 });

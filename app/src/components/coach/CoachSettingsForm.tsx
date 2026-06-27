@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { compressImage } from "@/lib/image";
-import { deleteAvatar, getAvatar, putAvatar } from "@/lib/avatarStore";
+import { compressAvatarToDataUrl } from "@/lib/image";
+import { deleteAvatar, resolveAvatarUrl } from "@/lib/avatarStore";
 import {
   coachConfigured,
   coachDisplayName,
@@ -52,20 +52,34 @@ export function CoachSettingsForm({ existing, onSave }: Props) {
   );
 }
 
-/** Read-only avatar for the saved view (custom blob > preset > default mascot). */
+/** Read-only avatar for the saved view: SYNCED data URL > legacy device-local
+ *  blob > preset > default mascot. Uses resolveAvatarUrl (the same resolver the
+ *  profile avatar uses) so a custom coach photo shows across devices. */
 function ViewAvatar({ settings, name }: { settings: CoachSettings; name: string }) {
   const [customUrl, setCustomUrl] = useState<string | null>(null);
-  const { avatarPhotoId, presetAvatar } = settings;
+  const { avatarDataUrl, avatarPhotoId, presetAvatar } = settings;
 
   useEffect(() => {
-    let url: string | null = null;
+    let objectUrl: string | null = null;
     let cancelled = false;
-    if (avatarPhotoId) {
-      getAvatar(avatarPhotoId)
-        .then((blob) => {
-          if (cancelled || !blob) return;
-          url = URL.createObjectURL(blob);
-          setCustomUrl(url);
+    if (avatarDataUrl || avatarPhotoId) {
+      resolveAvatarUrl({ avatarDataUrl, avatarPhotoId })
+        .then((res) => {
+          if (!res) {
+            if (!cancelled) setCustomUrl(null);
+            return;
+          }
+          if (res.revoke) {
+            // If cleanup already ran (cancelled), revoke right here — the cleanup
+            // saw objectUrl===null and couldn't, so a late resolve would leak.
+            if (cancelled) {
+              URL.revokeObjectURL(res.url);
+              return;
+            }
+            objectUrl = res.url; // cleanup will revoke it.
+          }
+          if (cancelled) return;
+          setCustomUrl(res.url);
         })
         .catch(() => undefined);
     } else {
@@ -73,9 +87,9 @@ function ViewAvatar({ settings, name }: { settings: CoachSettings; name: string 
     }
     return () => {
       cancelled = true;
-      if (url) URL.revokeObjectURL(url);
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [avatarPhotoId]);
+  }, [avatarDataUrl, avatarPhotoId]);
 
   const src = customUrl ?? presetAvatarSrc(presetAvatar);
   return (
@@ -249,32 +263,60 @@ function CoachSettingsEditForm({ existing, onSave, onSaved }: EditProps) {
   const [style, setStyle] = useState<CoachStyle>(existing.style ?? DEFAULT_STYLE);
   const [presetAvatar, setPresetAvatar] = useState<string | undefined>(existing.presetAvatar);
 
-  // Custom avatar: blob in IndexedDB, only the id ref persisted (mirrors profile).
-  const [avatarPhotoId, setAvatarPhotoId] = useState<string | undefined>(existing.avatarPhotoId);
+  // Custom avatar: embedded as a small data: URL ON the settings so it SYNCS
+  // across devices (mirrors the profile avatar; the legacy IndexedDB blob no
+  // longer crosses devices). We seed from the synced data URL, and fall back to
+  // a legacy device-local blob preview for settings saved before the change.
+  const [avatarDataUrl, setAvatarDataUrl] = useState<string | undefined>(existing.avatarDataUrl);
+  // Legacy blob ref (preview-only fallback). Preserved across an unrelated edit
+  // so editing name/style alone can't wipe a not-yet-migrated custom photo.
+  const legacyPhotoId = existing.avatarPhotoId;
+  // Explicit "the user cleared the custom photo this session" flag, so removing
+  // it suppresses the legacy fallback (same pattern as the profile form).
+  const [avatarCleared, setAvatarCleared] = useState(false);
   const [customUrl, setCustomUrl] = useState<string | null>(null);
   const [avatarBusy, setAvatarBusy] = useState(false);
   const avatarFileRef = useRef<HTMLInputElement>(null);
-  // Avatar staged this session but not yet committed — clean up on swap.
-  const stagedAvatarRef = useRef<string | null>(null);
 
-  // Load a preview for the current custom avatar id.
+  // Load a preview: prefer the synced data URL; fall back to the legacy blob
+  // (only when no data URL is set AND the user hasn't cleared it this session).
   useEffect(() => {
-    let url: string | null = null;
+    let objectUrl: string | null = null;
     let cancelled = false;
-    if (avatarPhotoId) {
-      getAvatar(avatarPhotoId).then((blob) => {
-        if (cancelled || !blob) return;
-        url = URL.createObjectURL(blob);
-        setCustomUrl(url);
-      });
+    if (avatarDataUrl) {
+      setCustomUrl(avatarDataUrl);
+    } else if (avatarCleared) {
+      setCustomUrl(null);
+    } else if (legacyPhotoId) {
+      resolveAvatarUrl({ avatarPhotoId: legacyPhotoId })
+        .then((res) => {
+          if (!res) {
+            if (!cancelled) setCustomUrl(null);
+            return;
+          }
+          if (res.revoke) {
+            // If cleanup already ran (cancelled), revoke right here — the cleanup
+            // saw objectUrl===null and couldn't, so a late resolve would leak.
+            if (cancelled) {
+              URL.revokeObjectURL(res.url);
+              return;
+            }
+            objectUrl = res.url; // cleanup will revoke it.
+          }
+          if (cancelled) return;
+          setCustomUrl(res.url);
+        })
+        .catch(() => {
+          if (!cancelled) setCustomUrl(null);
+        });
     } else {
       setCustomUrl(null);
     }
     return () => {
       cancelled = true;
-      if (url) URL.revokeObjectURL(url);
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [avatarPhotoId]);
+  }, [avatarDataUrl, avatarCleared, legacyPhotoId]);
 
   async function handleAvatarFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -282,48 +324,50 @@ function CoachSettingsEditForm({ existing, onSave, onSaved }: EditProps) {
     if (!file) return;
     setAvatarBusy(true);
     try {
-      const blob = await compressImage(file);
-      const id = await putAvatar(blob);
-      // Drop a previously staged (uncommitted) custom avatar.
-      if (stagedAvatarRef.current && stagedAvatarRef.current !== existing.avatarPhotoId) {
-        await deleteAvatar(stagedAvatarRef.current).catch(() => undefined);
-      }
-      stagedAvatarRef.current = id;
-      setAvatarPhotoId(id);
+      const dataUrl = await compressAvatarToDataUrl(file);
+      if (!dataUrl) return; // undecodable / over budget → keep the current avatar.
+      setAvatarCleared(false); // a fresh pick un-clears.
+      setAvatarDataUrl(dataUrl);
       setPresetAvatar(undefined); // a custom photo overrides any preset
     } finally {
       setAvatarBusy(false);
     }
   }
 
-  async function removeCustomAvatar() {
-    if (avatarPhotoId && avatarPhotoId !== existing.avatarPhotoId) {
-      await deleteAvatar(avatarPhotoId).catch(() => undefined);
-    }
-    if (stagedAvatarRef.current === avatarPhotoId) stagedAvatarRef.current = null;
-    setAvatarPhotoId(undefined);
+  function removeCustomAvatar() {
+    setAvatarDataUrl(undefined);
+    setAvatarCleared(true); // suppress the legacy fallback so the preview clears.
   }
 
   function choosePreset(id: string) {
     setPresetAvatar(id);
     // Choosing a preset clears any custom photo selection (presets win in UI).
-    void removeCustomAvatar();
+    removeCustomAvatar();
   }
 
   function handleSubmit() {
-    // If a custom avatar was swapped vs the saved one, drop the old orphan blob.
-    if (existing.avatarPhotoId && existing.avatarPhotoId !== avatarPhotoId) {
-      deleteAvatar(existing.avatarPhotoId).catch(() => undefined);
+    // Whether the custom photo changed this session (new data URL or cleared).
+    const avatarChanged = avatarDataUrl !== existing.avatarDataUrl || avatarCleared;
+    // Drop the legacy IndexedDB blob ONLY when the photo was changed/cleared
+    // (it's being replaced by the data URL or removed). Best-effort; never blocks.
+    if (legacyPhotoId && avatarChanged) {
+      deleteAvatar(legacyPhotoId).catch(() => undefined);
     }
     const cleanName = sanitizeCoachName(name);
+    const hasCustom = !!avatarDataUrl;
     const settings: CoachSettings = {
       name: cleanName ? cleanName : undefined,
       gender,
       style,
-      avatarPhotoId,
-      presetAvatar: avatarPhotoId ? undefined : presetAvatar,
+      // Synced custom photo (follows the user across devices). The legacy
+      // avatarPhotoId is preserved ONLY when the photo was untouched on a
+      // legacy-only profile (so an unrelated edit can't wipe it; it still shows
+      // via the legacy fallback and migrates to the data URL on the next login).
+      avatarDataUrl,
+      avatarPhotoId: !avatarChanged && legacyPhotoId ? legacyPhotoId : undefined,
+      // A custom photo (data URL or a preserved legacy blob) overrides any preset.
+      presetAvatar: hasCustom || (!avatarChanged && legacyPhotoId) ? undefined : presetAvatar,
     };
-    stagedAvatarRef.current = null; // committed
     onSave(settings);
     // Return to the saved/confirmation view (Fix 2) — the parent re-reads the
     // now-persisted settings, so the view reflects exactly what was saved.

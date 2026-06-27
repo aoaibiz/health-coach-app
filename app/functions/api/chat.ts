@@ -7,40 +7,39 @@
 //
 // Exports:
 //   - handleChat(request, provider): pure, framework-free — the shared core used
-//     by BOTH the Node server and the member CF deploy (and unit tests with a
-//     MockChatProvider, no network, no real CLI).
-//   - onRequestPost: ACTIVE Cloudflare Pages entry for a member self-host deploy
-//     (token-gated, own-key Gemini chat).
+//     by the Node server AND unit tests (mock Request + a MockChatProvider, no
+//     network, no real CLI). THIS is the live code path.
 //
-// Two active runtimes, same pure core:
-//   1. OUR / FAMILY — the Node route (server/index.mjs) builds a CodexChatProvider.
-//   2. MEMBER SELF-HOST — onRequestPost builds the member's own-key Gemini chat
-//      provider via the worker-safe ../_llm/select-own.
-// Auth + concurrency are enforced at each entry: X-Health-App-Token gate, 503 when
-// the env token is unset, 401 on mismatch (the Node route adds a shared concurrency
-// cap), exactly like /api/analyze-meal.
+// Auth + concurrency are enforced by the Node route (server/index.mjs), exactly
+// like /api/analyze-meal: X-Health-App-Token gate, 503 when the env token is
+// unset, 401 on mismatch, shared concurrency cap.
 
 import type { ChatProvider } from "../_llm/chat";
-// A member's Cloudflare Pages (Workers) deploy is ALWAYS own-key, so the
-// onRequestPost path uses the WORKER-SAFE selector (./select-own) that imports
-// ONLY the fetch-native Gemini chat provider — never ../_llm/select, which
-// references the Node-only Codex providers (node:child_process / node:fs) and
-// would break the Workers bundle. The Node server keeps using ../_llm/select.
-import { makeOwnKeyChatProvider, type ProviderEnv } from "../_llm/select-own";
 import {
   COACH_GENDERS,
   COACH_STYLES,
   type ChatContext,
   type ChatTurn,
   type CoachGender,
+  type CoachHistorySummary,
   type CoachPersona,
   type CoachStyle,
+  type ExerciseProgress,
+  type FridgeAnalysisContext,
+  type FridgeIngredient,
   type LoggedMealContent,
   type LoggedMealTime,
   type MealAnalysisContext,
   type MealAnalysisItem,
+  type MuscleGroupStat,
+  type NutritionWindowAvg,
+  type ProgressTrend,
   type RecentDaySummary,
   type RegisteredProfile,
+  type SleepWindowAvg,
+  type TodayCalendarEvent,
+  type TodayPlanContext,
+  type WeightTrendSummary,
 } from "../_llm/chat-prompt";
 
 /** Cap the number of turns we forward (keep the prompt small + bounded cost). */
@@ -97,6 +96,34 @@ const MAX_PROFILE_LABEL_CHARS = 16;
 
 /** Max coach-name length once sanitised to a single line (UI also caps input). */
 const MAX_COACH_NAME_CHARS = 24;
+
+/** Allowed muscle-group keys (mirrors src/lib/muscleGroups MuscleGroup). A key
+ *  outside this set is dropped so a tampered request can't inject a label. */
+const ALLOWED_MUSCLE_GROUPS = new Set([
+  "chest",
+  "back",
+  "legs",
+  "shoulders",
+  "arms",
+  "core",
+  "cardio",
+  "other",
+]);
+/** The MAIN strength groups only (mirrors MAIN_MUSCLE_GROUPS). The "untrained
+ *  gap" (空白) is a STRENGTH-gap concept, so cardio/other are NOT valid there —
+ *  restricting this field prevents a tampered client from inventing a non-main
+ *  "未トレ部位" in the prompt (Codex review). */
+const ALLOWED_MAIN_GROUPS = new Set(["chest", "back", "legs", "shoulders", "arms", "core"]);
+/** Allowed progression-trend keys (enum allow-list). */
+const ALLOWED_TRENDS = new Set(["up", "down", "flat", "insufficient"]);
+/** Bounds for the longitudinal history summary (defense-in-depth). */
+const MAX_HISTORY_NUTRITION_WINDOWS = 5; // 7/14/30/90/365
+const MAX_HISTORY_SLEEP_WINDOWS = 4; // 7/30/90/365
+const MAX_HISTORY_MUSCLE_GROUPS = 8; // the main+aux groups
+const MAX_HISTORY_PROGRESSION = 8; // top weighted lifts
+const MAX_HISTORY_DAYS = 366; // any "days" field (window/span) clamp
+const MAX_VOLUME_KG = 1_000_000; // a generous Σweight×reps clamp
+const MAX_EXERCISE_NAME_CHARS = 40;
 
 /** Logged-CONTENT bounds (defense-in-depth — the client also caps these). */
 /** Max chars for a single item/exercise line once single-lined. */
@@ -309,9 +336,6 @@ export function shapeContext(raw: ChatContext | undefined): ChatContext | undefi
   const loggedWorkoutItems = shapeLoggedWorkoutItems(raw.loggedWorkoutItems);
   if (loggedWorkoutItems.length > 0) out.loggedWorkoutItems = loggedWorkoutItems;
 
-  const mealAnalysis = shapeMealAnalysis(raw.mealAnalysis);
-  if (mealAnalysis) out.mealAnalysis = mealAnalysis;
-
   // Today's MAJOR vitamins/minerals (拡張①) — own data, sanitised + bounded like
   // the other content lines (each single-lined + length-clamped, count capped).
   const intakeMicros = shapeIntakeMicros(raw.intakeMicros);
@@ -324,15 +348,125 @@ export function shapeContext(raw: ChatContext | undefined): ChatContext | undefi
   const recentDays = shapeRecentDays(raw.recentDays);
   if (recentDays.length > 0) out.recentDays = recentDays;
 
+  // Longitudinal history summary (履歴ベースの傾向) — own data, still clamped +
+  // enum-checked + bounded so a tampered request can't inject/balloon the prompt.
+  const historySummary = shapeCoachHistory(raw.historySummary);
+  if (historySummary) out.historySummary = historySummary;
+
+  const mealAnalysis = shapeMealAnalysis(raw.mealAnalysis);
+  if (mealAnalysis) out.mealAnalysis = mealAnalysis;
+
+  // Fridge→献立 analysis (Phase2) — same untrusted-input discipline as the meal
+  // analysis: ingredient names single-lined + length-clamped, grams clamped, count
+  // bounded; a tampered field can't inject prompt content or balloon the list.
+  const fridgeAnalysis = shapeFridgeAnalysis(raw.fridgeAnalysis);
+  if (fridgeAnalysis) out.fridgeAnalysis = fridgeAnalysis;
+
+  // 1日まるごと自動プラン: the day READ (existing calendar events) — same untrusted
+  // discipline. Event summaries are single-lined + clamped; start/end must be a
+  // valid zoned RFC3339 (or YYYY-MM-DD for all-day); count bounded. A tampered
+  // field can't inject prompt content, balloon the list, or sneak a zoneless time.
+  const todayPlan = shapeTodayPlan(raw.todayPlan);
+  if (todayPlan) out.todayPlan = todayPlan;
+
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** Max calendar events forwarded into the chat prompt (bounded cost; normal days
+ *  have far fewer). */
+const MAX_TODAY_PLAN_EVENTS = 30;
+/** Max chars for an event summary once single-lined (anti-injection + bounded). */
+const MAX_EVENT_SUMMARY_CHARS = 80;
+/** Zoned RFC3339 (timed) OR YYYY-MM-DD (all-day). We REQUIRE a zone on timed
+ *  values so a zoneless instant can never reach the coach (anti-fabrication: a
+ *  time with no zone is ambiguous; we drop the event rather than guess). */
+const EVENT_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+const EVENT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** A valid event time: a zoned RFC3339 (timed) when !allDay, or a plain date when
+ *  allDay. Returns the verbatim string when valid, else null (the event is dropped). */
+function cleanEventTime(raw: unknown, allDay: boolean): string | null {
+  if (typeof raw !== "string") return null;
+  const s = raw.trim();
+  if (allDay) return EVENT_DATE_RE.test(s) ? s : null;
+  // A timed event must carry an explicit zone AND actually parse.
+  if (!EVENT_DATETIME_RE.test(s)) return null;
+  return Number.isFinite(Date.parse(s)) ? s : null;
+}
+
+/**
+ * Shape the (UNTRUSTED) day-plan READ the client attaches on a "plan my day" turn.
+ * `connected:false` short-circuits to a clean { connected:false } (the coach asks
+ * the user to connect; it never invents events). Otherwise each event must carry a
+ * VALID start (zoned RFC3339, or a date for all-day) — an event with a missing/bad/
+ * zoneless time is DROPPED (we never invent a time). The summary is sanitised to a
+ * single safe line + length-clamped (no injected heading) and the list is bounded.
+ * A connected day with no usable event is still { connected:true, events:[] } so the
+ * coach plans freely. Returns undefined when there's nothing usable.
+ */
+export function shapeTodayPlan(raw: unknown): TodayPlanContext | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as { connected?: unknown; events?: unknown };
+  if (r.connected !== true) return { connected: false };
+
+  const events: TodayCalendarEvent[] = [];
+  if (Array.isArray(r.events)) {
+    for (const it of r.events.slice(0, MAX_TODAY_PLAN_EVENTS)) {
+      if (!it || typeof it !== "object") continue;
+      const o = it as Record<string, unknown>;
+      const allDay = o.allDay === true;
+      const start = cleanEventTime(o.start, allDay);
+      if (!start) continue; // no usable start → drop (never invent a time)
+      const end = cleanEventTime(o.end, allDay) ?? start; // missing/bad end → fall back to start
+      // Summary may be empty (an untitled busy block still blocks time) — sanitised.
+      const summary = cleanStr(o.summary, MAX_EVENT_SUMMARY_CHARS);
+      events.push({ summary, start, end, allDay });
+    }
+  }
+  return { connected: true, events };
+}
+
+/** Max fridge ingredients forwarded into the chat prompt (bounded cost). */
+const MAX_FRIDGE_INGREDIENTS = 40;
+
+/**
+ * Shape the (untrusted) fridge analysis the client attaches to a chat turn
+ * (Phase2). Mirrors shapeMealAnalysis: ok:false short-circuits; otherwise each
+ * ingredient must carry a usable single-line name (length-clamped, no injected
+ * heading) and an optional clamped grams; the list is bounded. An ok:true with no
+ * usable ingredient yields `{ok:true, ingredients:[]}` so the coach asks rather
+ * than the prompt omitting it. Returns undefined when there's nothing usable.
+ */
+export function shapeFridgeAnalysis(raw: unknown): FridgeAnalysisContext | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as { ok?: unknown; ingredients?: unknown };
+  const ok = r.ok === true;
+  if (!ok) return { ok: false };
+
+  if (!Array.isArray(r.ingredients)) return undefined;
+  const ingredients: FridgeIngredient[] = [];
+  for (const it of r.ingredients.slice(0, MAX_FRIDGE_INGREDIENTS)) {
+    if (!it || typeof it !== "object") continue;
+    const o = it as Record<string, unknown>;
+    const name = cleanStr(o.name, 60);
+    if (!name) continue;
+    const ingredient: FridgeIngredient = { name };
+    // grams is an optional on-hand hint; clamp absurd/negative/NaN away (omit it).
+    const grams = cleanClampedNum(o.grams, MAX_GRAMS);
+    if (grams !== null && grams > 0) ingredient.grams = grams;
+    ingredients.push(ingredient);
+  }
+  return { ok: true, ingredients };
 }
 
 /** Max recent days forwarded into the prompt (bounded cost). */
 const MAX_RECENT_DAYS = 7;
-/** For how many recent days the per-meal item detail survives shaping (token-bounded). */
-const MAX_RECENT_MEAL_DETAIL_DAYS = 3;
+/** For how many recent days item detail survives shaping (token-bounded by line caps). */
+const MAX_RECENT_DETAIL_DAYS = MAX_RECENT_DAYS;
 /** Max length of a recent-day sleep label once single-lined. */
 const MAX_SLEEP_LABEL_CHARS = 20;
+/** Max length of a full recent-day sleep range once single-lined. */
+const MAX_SLEEP_DETAIL_CHARS = 48;
 
 /**
  * Shape the (untrusted) recent-days digest. Each day must carry a usable label
@@ -360,46 +494,31 @@ export function shapeRecentDays(raw: unknown): RecentDaySummary[] {
     if (exerciseCount !== null) day.exerciseCount = Math.round(exerciseCount);
     const sleep = cleanStr(o.sleep, MAX_SLEEP_LABEL_CHARS);
     if (sleep) day.sleep = sleep;
-    // Per-meal item detail survives shaping only for the most-recent few days
-    // (token-bounded), via the SAME sanitiser as today's items (non-string removal,
-    // slot allowlist, single-line, item cap) so "昨日と同じで記録" can ground on
-    // the real items without letting an untrusted client balloon/inject the prompt.
-    if (idx < MAX_RECENT_MEAL_DETAIL_DAYS) {
+    const sleepDetail = cleanStr(o.sleepDetail, MAX_SLEEP_DETAIL_CHARS);
+    if (sleepDetail) day.sleepDetail = sleepDetail;
+    // Recent item detail survives shaping for the full recent window, but remains
+    // bounded via the SAME sanitisers as today's items/workouts (single-line,
+    // slot allowlist, item cap). This lets the coach know the actual recent
+    // contents while still preventing prompt ballooning/injection.
+    if (idx < MAX_RECENT_DETAIL_DAYS) {
       const meals = shapeLoggedMealItems(o.meals);
       if (meals.length > 0) day.meals = meals;
+      const workouts = shapeLoggedWorkoutItems(o.workouts);
+      if (workouts.length > 0) day.workouts = workouts;
     }
     // Keep only days that carry at least one real metric (not just a label).
     if (
       day.intakeKcal !== undefined ||
       day.burnKcal !== undefined ||
       day.sleep !== undefined ||
+      day.sleepDetail !== undefined ||
       day.mealCount !== undefined ||
       day.exerciseCount !== undefined ||
-      day.meals !== undefined
+      day.meals !== undefined ||
+      day.workouts !== undefined
     ) {
       out.push(day);
     }
-  }
-  return out;
-}
-
-/** Max intake-micro lines forwarded (拡張① — the curated 主要 set is ~10; cap is
- *  bounded defense-in-depth so a tampered request can't balloon the prompt). */
-const MAX_INTAKE_MICRO_LINES = 18;
-
-/**
- * Shape the (untrusted) today's-intake micros summary (拡張①). The client sends
- * pre-formatted "label value unit" lines for the bounded 主要 set; the endpoint
- * still treats them as untrusted — each line is sanitised to a single safe line
- * (no injected heading) + length-clamped, and the count is bounded. Returns []
- * when nothing usable (the prompt omits the line — an unlogged micro is never 0).
- */
-export function shapeIntakeMicros(raw: unknown): string[] {
-  if (!Array.isArray(raw)) return [];
-  const out: string[] = [];
-  for (const line of raw.slice(0, MAX_INTAKE_MICRO_LINES)) {
-    const s = cleanStr(line, MAX_CONTENT_LINE_CHARS);
-    if (s) out.push(s);
   }
   return out;
 }
@@ -474,6 +593,27 @@ export function shapeLoggedWorkoutItems(raw: unknown): string[] {
   return out;
 }
 
+/** Max intake-micro lines forwarded (拡張① — the curated 主要 set is ~10; cap is
+ *  bounded defense-in-depth so a tampered request can't balloon the prompt). */
+const MAX_INTAKE_MICRO_LINES = 18;
+
+/**
+ * Shape the (untrusted) today's-intake micros summary (拡張①). The client sends
+ * pre-formatted "label value unit" lines for the bounded 主要 set; the endpoint
+ * still treats them as untrusted — each line is sanitised to a single safe line
+ * (no injected heading) + length-clamped, and the count is bounded. Returns []
+ * when nothing usable (the prompt omits the line — an unlogged micro is never 0).
+ */
+export function shapeIntakeMicros(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const line of raw.slice(0, MAX_INTAKE_MICRO_LINES)) {
+    const s = cleanStr(line, MAX_CONTENT_LINE_CHARS);
+    if (s) out.push(s);
+  }
+  return out;
+}
+
 /** Max analysed items forwarded into the chat prompt (bounded cost). */
 const MAX_ANALYSIS_ITEMS = 20;
 
@@ -517,6 +657,213 @@ export function shapeMealAnalysis(raw: unknown): MealAnalysisContext | undefined
   }
   if (items.length === 0) return { ok: true, items: [] };
   return { ok: true, items, estimated: r.estimated === true };
+}
+
+/**
+ * Shape the (untrusted) longitudinal history summary the client attaches. This
+ * is the user's OWN aggregated history going to their own coach, but the endpoint
+ * still treats it as untrusted — every number is clamped to a sane range
+ * (NaN/Infinity/negative → dropped), every key is enum/allow-list checked
+ * (muscle groups, trends), every name is sanitised to a single safe line +
+ * length-clamped, and every list is bounded. A block with nothing usable is
+ * omitted, so the prompt never reads an injected/absurd trend. Returns undefined
+ * when nothing usable remains.
+ */
+export function shapeCoachHistory(raw: unknown): CoachHistorySummary | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: CoachHistorySummary = {};
+
+  // --- Nutrition windows ---
+  if (Array.isArray(r.nutrition)) {
+    const nutrition: NutritionWindowAvg[] = [];
+    for (const it of r.nutrition.slice(0, MAX_HISTORY_NUTRITION_WINDOWS)) {
+      if (!it || typeof it !== "object") continue;
+      const o = it as Record<string, unknown>;
+      const days = cleanClampedNum(o.days, MAX_HISTORY_DAYS);
+      const loggedDays = cleanClampedNum(o.loggedDays, MAX_HISTORY_DAYS);
+      if (days === null || loggedDays === null) continue;
+      const w: NutritionWindowAvg = { days: Math.round(days), loggedDays: Math.round(loggedDays) };
+      const avgKcal = cleanClampedNum(o.avgKcal, MAX_KCAL);
+      if (avgKcal !== null) w.avgKcal = Math.round(avgKcal);
+      const avgProteinG = cleanClampedNum(o.avgProteinG, MAX_GRAMS);
+      if (avgProteinG !== null) w.avgProteinG = Math.round(avgProteinG);
+      const avgFatG = cleanClampedNum(o.avgFatG, MAX_GRAMS);
+      if (avgFatG !== null) w.avgFatG = Math.round(avgFatG);
+      const avgCarbG = cleanClampedNum(o.avgCarbG, MAX_GRAMS);
+      if (avgCarbG !== null) w.avgCarbG = Math.round(avgCarbG);
+      const proteinDeficitG = cleanClampedNum(o.proteinDeficitG, MAX_GRAMS);
+      if (proteinDeficitG !== null) w.proteinDeficitG = Math.round(proteinDeficitG);
+      // kcalVsTarget is SIGNED (surplus +, deficit −) → clamp magnitude, keep sign.
+      const kvt = o.kcalVsTarget;
+      if (typeof kvt === "number" && Number.isFinite(kvt)) {
+        w.kcalVsTarget = Math.round(Math.max(-MAX_KCAL, Math.min(MAX_KCAL, kvt)));
+      }
+      nutrition.push(w);
+    }
+    if (nutrition.length > 0) out.nutrition = nutrition;
+  }
+
+  // --- Sleep windows ---
+  if (Array.isArray(r.sleep)) {
+    const sleep: SleepWindowAvg[] = [];
+    for (const it of r.sleep.slice(0, MAX_HISTORY_SLEEP_WINDOWS)) {
+      if (!it || typeof it !== "object") continue;
+      const o = it as Record<string, unknown>;
+      const days = cleanClampedNum(o.days, MAX_HISTORY_DAYS);
+      const loggedDays = cleanClampedNum(o.loggedDays, MAX_HISTORY_DAYS);
+      if (days === null || loggedDays === null) continue;
+      const w: SleepWindowAvg = { days: Math.round(days), loggedDays: Math.round(loggedDays) };
+      const avgDurationMin = cleanClampedNum(o.avgDurationMin, 24 * 60);
+      if (avgDurationMin !== null) w.avgDurationMin = Math.round(avgDurationMin);
+      const shortSleepDays = cleanClampedNum(o.shortSleepDays, MAX_HISTORY_DAYS);
+      if (shortSleepDays !== null) w.shortSleepDays = Math.round(shortSleepDays);
+      const longSleepDays = cleanClampedNum(o.longSleepDays, MAX_HISTORY_DAYS);
+      if (longSleepDays !== null) w.longSleepDays = Math.round(longSleepDays);
+      sleep.push(w);
+    }
+    if (sleep.length > 0) out.sleep = sleep;
+  }
+
+  // --- Muscle-group frequency ---
+  if (Array.isArray(r.muscleGroups)) {
+    const groups: MuscleGroupStat[] = [];
+    for (const it of r.muscleGroups.slice(0, MAX_HISTORY_MUSCLE_GROUPS)) {
+      if (!it || typeof it !== "object") continue;
+      const o = it as Record<string, unknown>;
+      const group = typeof o.group === "string" ? o.group : "";
+      if (!ALLOWED_MUSCLE_GROUPS.has(group)) continue;
+      const daysTrained = cleanClampedNum(o.daysTrained, MAX_HISTORY_DAYS);
+      const sessions = cleanClampedNum(o.sessions, 1000);
+      const stat: MuscleGroupStat = {
+        group,
+        daysTrained: daysTrained === null ? 0 : Math.round(daysTrained),
+        sessions: sessions === null ? 0 : Math.round(sessions),
+        daysSinceLast: null,
+      };
+      const since = cleanClampedNum(o.daysSinceLast, MAX_HISTORY_DAYS);
+      stat.daysSinceLast = since === null ? null : Math.round(since);
+      groups.push(stat);
+    }
+    if (groups.length > 0) out.muscleGroups = groups;
+  }
+
+  // --- Untrained groups (空白) — enum allow-list, deduped, bounded ---
+  if (Array.isArray(r.untrainedGroups)) {
+    const seen = new Set<string>();
+    const untrained: string[] = [];
+    for (const g of r.untrainedGroups.slice(0, MAX_HISTORY_MUSCLE_GROUPS)) {
+      // MAIN groups only — a "未トレ部位" gap is a strength concept, so cardio/
+      // other are not valid here (and can't be injected as a fake gap).
+      if (typeof g !== "string" || !ALLOWED_MAIN_GROUPS.has(g) || seen.has(g)) continue;
+      seen.add(g);
+      untrained.push(g);
+    }
+    if (untrained.length > 0) out.untrainedGroups = untrained;
+  }
+
+  const workoutDays = cleanClampedNum(r.workoutDaysInWindow, MAX_HISTORY_DAYS);
+  if (workoutDays !== null) out.workoutDaysInWindow = Math.round(workoutDays);
+
+  const muscleWindowDays = cleanClampedNum(r.muscleWindowDays, MAX_HISTORY_DAYS);
+  if (muscleWindowDays !== null) out.muscleWindowDays = Math.round(muscleWindowDays);
+
+  // --- Annual muscle-group frequency ---
+  if (Array.isArray(r.longTermMuscleGroups)) {
+    const groups: MuscleGroupStat[] = [];
+    for (const it of r.longTermMuscleGroups.slice(0, MAX_HISTORY_MUSCLE_GROUPS)) {
+      if (!it || typeof it !== "object") continue;
+      const o = it as Record<string, unknown>;
+      const group = typeof o.group === "string" ? o.group : "";
+      if (!ALLOWED_MUSCLE_GROUPS.has(group)) continue;
+      const daysTrained = cleanClampedNum(o.daysTrained, MAX_HISTORY_DAYS);
+      const sessions = cleanClampedNum(o.sessions, 1000);
+      const stat: MuscleGroupStat = {
+        group,
+        daysTrained: daysTrained === null ? 0 : Math.round(daysTrained),
+        sessions: sessions === null ? 0 : Math.round(sessions),
+        daysSinceLast: null,
+      };
+      const since = cleanClampedNum(o.daysSinceLast, MAX_HISTORY_DAYS);
+      stat.daysSinceLast = since === null ? null : Math.round(since);
+      groups.push(stat);
+    }
+    if (groups.length > 0) out.longTermMuscleGroups = groups;
+  }
+
+  const longTermWorkoutDays = cleanClampedNum(r.longTermWorkoutDays, MAX_HISTORY_DAYS);
+  if (longTermWorkoutDays !== null) out.longTermWorkoutDays = Math.round(longTermWorkoutDays);
+  const longTermWindowDays = cleanClampedNum(r.longTermWindowDays, MAX_HISTORY_DAYS);
+  if (longTermWindowDays !== null) out.longTermWindowDays = Math.round(longTermWindowDays);
+
+  // --- Progression ---
+  if (Array.isArray(r.progression)) {
+    const prog: ExerciseProgress[] = [];
+    for (const it of r.progression.slice(0, MAX_HISTORY_PROGRESSION)) {
+      if (!it || typeof it !== "object") continue;
+      const o = it as Record<string, unknown>;
+      const name = cleanStr(o.name, MAX_EXERCISE_NAME_CHARS);
+      if (!name) continue;
+      const group =
+        typeof o.group === "string" && ALLOWED_MUSCLE_GROUPS.has(o.group) ? o.group : "other";
+      const trend: ProgressTrend =
+        typeof o.trend === "string" && ALLOWED_TRENDS.has(o.trend)
+          ? (o.trend as ProgressTrend)
+          : "insufficient";
+      const sessions = cleanClampedNum(o.sessions, 1000);
+      const bestVolumeKg = cleanClampedNum(o.bestVolumeKg, MAX_VOLUME_KG);
+      const topWeightKg = cleanClampedNum(o.topWeightKg, MAX_WEIGHT_KG);
+      const recentVolumeKg = cleanClampedNum(o.recentVolumeKg, MAX_VOLUME_KG);
+      const firstVolumeKg = cleanClampedNum(o.firstVolumeKg, MAX_VOLUME_KG);
+      // The numbers are what the prompt RENDERS as logged volumes/weights, so an
+      // invalid/missing one must DROP the item — never coerce to a fabricated 0kg
+      // that the coach would state as a real logged figure (Codex review).
+      if (
+        bestVolumeKg === null ||
+        topWeightKg === null ||
+        recentVolumeKg === null ||
+        firstVolumeKg === null
+      ) {
+        continue;
+      }
+      prog.push({
+        name,
+        group,
+        sessions: sessions === null ? 0 : Math.round(sessions),
+        bestVolumeKg,
+        topWeightKg,
+        recentVolumeKg,
+        firstVolumeKg,
+        trend,
+      });
+    }
+    if (prog.length > 0) out.progression = prog;
+  }
+
+  // --- Weight trend ---
+  if (r.weightTrend && typeof r.weightTrend === "object") {
+    const o = r.weightTrend as Record<string, unknown>;
+    const startKg = cleanClampedNum(o.startKg, MAX_WEIGHT_KG);
+    const latestKg = cleanClampedNum(o.latestKg, MAX_WEIGHT_KG);
+    if (startKg !== null && latestKg !== null) {
+      const spanDays = cleanClampedNum(o.spanDays, MAX_HISTORY_DAYS);
+      // deltaKg is SIGNED → clamp magnitude, keep sign (recompute if garbage).
+      const rawDelta = o.deltaKg;
+      const deltaKg =
+        typeof rawDelta === "number" && Number.isFinite(rawDelta)
+          ? Math.max(-MAX_WEIGHT_KG, Math.min(MAX_WEIGHT_KG, rawDelta))
+          : latestKg - startKg;
+      const wt: WeightTrendSummary = {
+        startKg,
+        latestKg,
+        deltaKg: Math.round(deltaKg * 10) / 10,
+        spanDays: spanDays === null ? 0 : Math.round(spanDays),
+      };
+      out.weightTrend = wt;
+    }
+  }
+
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /**
@@ -564,62 +911,6 @@ export async function handleChat(
 
   const responseBody: ChatResponse = { reply: reply.trim() };
   return json(responseBody);
-}
-
-// ---- Cloudflare Pages Functions entry (member self-host deploy) -----------
-// The chat route a MEMBER's own Cloudflare Pages deploy runs. Selects the AI
-// provider from the deploy's env via select.ts (AI_MODE=own + AI_PROVIDER=gemini
-// → the member's own GEMINI_API_KEY; default → Codex), then calls the SAME pure
-// handleChat() the Node server uses. Access-gated IDENTICALLY to analyze-meal:
-// X-Health-App-Token must match the deploy's APP_ACCESS_TOKEN env (fail-closed
-// 503 when unset, 401 on mismatch). Honest errors, never fabricates a reply.
-
-interface PagesContext {
-  request: Request;
-  env: ChatEnv;
-}
-
-/** The env a member's Pages deploy provides (provider selection + access gate). */
-type ChatEnv = ProviderEnv & { APP_ACCESS_TOKEN?: string };
-
-/**
- * Constant-time-ish token comparison without Node crypto (CF Workers runtime).
- * Length check first (lengths are not secret), then a non-short-circuiting XOR
- * accumulate so the decision time doesn't leak the prefix.
- */
-function tokensMatch(provided: string | null, expected: string): boolean {
-  if (typeof provided !== "string") return false;
-  if (provided.length !== expected.length) return false;
-  let diff = 0;
-  for (let i = 0; i < expected.length; i++) {
-    diff |= provided.charCodeAt(i) ^ expected.charCodeAt(i);
-  }
-  return diff === 0;
-}
-
-/** ACTIVE CF Pages Functions handler — member self-host deploy chat entry. */
-export async function onRequestPost(context: PagesContext): Promise<Response> {
-  const expected = context.env.APP_ACCESS_TOKEN ?? "";
-  if (!expected) {
-    return json(
-      { error: "chat_unavailable", message: "チャットは準備中です。" },
-      503,
-    );
-  }
-  if (!tokensMatch(context.request.headers.get("x-health-app-token"), expected)) {
-    return errorResponse("unauthorized", 401);
-  }
-
-  let provider: ChatProvider;
-  try {
-    provider = makeOwnKeyChatProvider(context.env);
-  } catch {
-    return json(
-      { error: "chat_unavailable", message: "チャットは準備中です。" },
-      503,
-    );
-  }
-  return handleChat(context.request, provider);
 }
 
 export type { ChatContext, ChatTurn };

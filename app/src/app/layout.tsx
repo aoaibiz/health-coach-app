@@ -9,6 +9,23 @@ import { AuthGate } from "@/components/auth/AuthGate";
 export const metadata: Metadata = {
   title: "Health",
   description: "食事と筋トレのパーソナル記録",
+  manifest: "/manifest.webmanifest",
+  icons: {
+    icon: [
+      { url: "/favicon.ico", sizes: "any" },
+      { url: "/icon-192.png", type: "image/png", sizes: "192x192" },
+    ],
+    apple: [{ url: "/apple-touch-icon.png", sizes: "180x180" }],
+  },
+  appleWebApp: {
+    capable: true,
+    title: "Health",
+  },
+  // Modern equivalent of the (now-deprecated) apple-mobile-web-app-capable tag
+  // that appleWebApp.capable emits; keeps Chrome from logging a deprecation warning.
+  other: {
+    "mobile-web-app-capable": "yes",
+  },
 };
 
 export const viewport: Viewport = {

@@ -8,13 +8,14 @@
 // On failure this throws an honest error — the UI keeps the conversation and
 // lets the user retry. It never fabricates a reply.
 
-import { API_TOKEN_STORAGE_KEY } from "./analyzeMeal";
+import { resolveApiToken } from "./analyzeMeal";
 import { activityLabel, bodyTypeLabel, goalLabel, sexLabel } from "./profileView";
 import { clampGrams, clampQty } from "./mealItems";
 import { isWeightedExercise } from "./burn";
 import { setsFor, summarizeSets } from "./workoutSets";
 import { microDef } from "../../functions/_lib/micros";
 import type { IntakeTotals } from "./intake";
+import type { CoachHistory } from "./coachContext";
 import type { Exercise, Meal, Micros, NutritionTargets, Profile } from "./types";
 
 /** One grounded item from a photo analysis, forwarded so the coach can narrate it. */
@@ -43,6 +44,43 @@ export interface ChatMealAnalysis {
   ok: boolean;
   items?: ChatMealAnalysisItem[];
   estimated?: boolean;
+}
+
+/** One visible ingredient from a 冷蔵庫/食材 photo (chat→献立, Phase2). */
+export interface ChatFridgeIngredient {
+  name: string;
+  /** Rough on-hand grams when known (omitted when unknown). */
+  grams?: number;
+}
+
+/**
+ * Grounded fridge-analysis attached to a 冷蔵庫/食材 photo turn (chat→献立, Phase2).
+ * ok:false = the photo wasn't readable as a fridge/ingredient shot. The coach
+ * proposes menus ONLY from `ingredients` (never invents what's not listed).
+ */
+export interface ChatFridgeAnalysis {
+  ok: boolean;
+  ingredients?: ChatFridgeIngredient[];
+}
+
+/** One existing calendar event for today (1日まるごと自動プラン), mirrors the
+ *  backend TodayCalendarEvent. Times are verbatim from Google; the coach plans
+ *  around these REAL events (never moves/invents them). */
+export interface ChatTodayEvent {
+  summary: string;
+  start: string;
+  end: string;
+  allDay: boolean;
+}
+
+/**
+ * The day READ for the 1日まるごと自動プラン flow (mirrors the backend
+ * TodayPlanContext). connected:false = the calendar isn't linked (the coach asks
+ * to connect, never invents events). Only set on an explicit "plan my day" turn.
+ */
+export interface ChatTodayPlan {
+  connected: boolean;
+  events?: ChatTodayEvent[];
 }
 
 /** One of today's logged meals reduced to slot + local HH:MM (meal spacing). */
@@ -136,15 +174,38 @@ export interface ChatContext {
    * line is one day; absent/empty when there's no recent logged data.
    */
   recentDays?: RecentDaySummary[];
+  /**
+   * The longitudinal coaching summary (履歴ベースの傾向): nutrition/sleep averages,
+   * muscle-group frequency + gaps, lift progression, weight trend — aggregated
+   * client-side from up to the last 365 days of logged history so the coach can
+   * lead with proactive, history-grounded advice. Absent for a brand-new user.
+   * Same shape the server reads (CoachHistorySummary in chat-prompt.ts).
+   */
+  historySummary?: CoachHistory;
   /** Grounded result of a photo the user sent THIS turn. Only set on a photo turn. */
   mealAnalysis?: ChatMealAnalysis;
+  /**
+   * Grounded result of a 冷蔵庫/食材 photo the user sent THIS turn (chat→献立, Phase2).
+   * Only set when the turn carried a fridge photo + a menu-intent text. Mutually
+   * exclusive with mealAnalysis (a turn is either "log this meal" or "menu from
+   * this fridge"). The coach proposes 献立 from these ingredients only.
+   */
+  fridgeAnalysis?: ChatFridgeAnalysis;
+  /**
+   * The day READ for the 1日まるごと自動プラン flow. Only set on a turn whose text
+   * was an explicit "plan my whole day" ask — the client reads the user's existing
+   * calendar events so the coach can plan around them. connected:false = not linked
+   * (the coach asks to connect, never invents events).
+   */
+  todayPlan?: ChatTodayPlan;
 }
 
 /**
  * A compact one-day digest for the recent-history window the coach reads. Every
- * field is optional and already summarised/clamped by the client (no raw item
- * lists) so the recent window can't balloon the prompt. Nothing is invented —
- * a day with no logged data simply isn't included.
+ * field is optional and already summarised/clamped by the client. Recent item
+ * detail is capped to a small list so the coach can answer "昨日何をやった/食べた"
+ * without ballooning the prompt. Nothing is invented — a day with no logged data
+ * simply isn't included.
  */
 export interface RecentDaySummary {
   /** The day, as a friendly label (e.g. "6月20日(金)"). */
@@ -159,6 +220,8 @@ export interface RecentDaySummary {
   exerciseCount?: number;
   /** Sleep length that day (e.g. "7時間0分"), when sleep was logged. */
   sleep?: string;
+  /** Full sleep range that day (e.g. "23:00→07:00（8時間0分）"), when logged. */
+  sleepDetail?: string;
   /**
    * WHAT was eaten that day, per meal slot (item lines like "ごはん150g・卵50g").
    * Only attached for the most-recent few days (token-bounded) so the coach can
@@ -167,6 +230,12 @@ export interface RecentDaySummary {
    * loggedMealItems; built by buildLoggedMealItems (item cap applied).
    */
   meals?: LoggedMealContent[];
+  /**
+   * WHAT exercises were logged that day (name + compact set summary). Attached
+   * for the recent window so the coach can refer to yesterday's actual exercise
+   * contents — not only "10種目".
+   */
+  workouts?: string[];
 }
 
 export interface ChatWireMessage {
@@ -290,6 +359,11 @@ function formatMealItemLine(item: {
 export function buildLoggedMealItems(meals: Meal[]): LoggedMealContent[] | undefined {
   const out: LoggedMealContent[] = [];
   for (const meal of meals) {
+    // Skip not-yet-eaten PLANS (AIプランナー 第3陣D — status "planned"): the coach's
+    // "今日の食事内容" must reflect what was actually EATEN, not a 献立 the user hasn't
+    // had yet. ABSENT status means eaten, so chat-logged + pre-feature + manual meals
+    // are unaffected (mirrors buildLoggedWorkoutItems' planned skip).
+    if (meal?.status === "planned") continue;
     const rawItems = meal?.nutrition?.items;
     if (!Array.isArray(rawItems) || rawItems.length === 0) continue;
     const lines: string[] = [];
@@ -320,6 +394,11 @@ export function buildLoggedWorkoutItems(
 ): string[] | undefined {
   const lines: string[] = [];
   for (const ex of exercises) {
+    // Skip not-yet-done PLANS (AIプランナー 第2陣C — status "planned"): the coach's
+    // "今日の運動内容" must reflect what was actually trained, not a plan the user
+    // hasn't completed yet. ABSENT status means done, so chat-logged + pre-feature
+    // exercises are unaffected.
+    if (ex?.status === "planned") continue;
     const name = cleanName(ex?.name);
     if (!name) continue;
     const bodyweight = !isWeightedExercise(ex);
@@ -401,6 +480,8 @@ export function buildChatContext(args: {
   sleepToday?: string;
   /** Recent-days digest (最近N日, excluding today) for trend-aware coaching. */
   recentDays?: RecentDaySummary[];
+  /** Longitudinal trends (栄養平均/部位頻度/伸び停滞/体重) for proactive coaching. */
+  historySummary?: CoachHistory;
   /** User-chosen coach persona (presentation only); absent → default 健康マン. */
   coach?: ChatCoachPersona;
 }): ChatContext {
@@ -416,6 +497,7 @@ export function buildChatContext(args: {
     loggedWorkoutItems,
     sleepToday,
     recentDays,
+    historySummary,
     coach,
   } = args;
   const ctx: ChatContext = {};
@@ -442,6 +524,22 @@ export function buildChatContext(args: {
   // coach never asserts a sleep length / past day that wasn't logged.
   if (sleepToday && sleepToday.trim()) ctx.sleepToday = sleepToday.trim();
   if (recentDays && recentDays.length > 0) ctx.recentDays = recentDays;
+
+  // Longitudinal trends — attach only when the summary carries real signal (any
+  // of its blocks present), so a brand-new user's empty summary is omitted and
+  // the coach never reads an invented trend.
+  if (
+    historySummary &&
+    ((historySummary.nutrition && historySummary.nutrition.length > 0) ||
+      (historySummary.sleep && historySummary.sleep.length > 0) ||
+      (historySummary.muscleGroups && historySummary.muscleGroups.length > 0) ||
+      (historySummary.untrainedGroups && historySummary.untrainedGroups.length > 0) ||
+      (historySummary.longTermMuscleGroups && historySummary.longTermMuscleGroups.length > 0) ||
+      (historySummary.progression && historySummary.progression.length > 0) ||
+      historySummary.weightTrend !== undefined)
+  ) {
+    ctx.historySummary = historySummary;
+  }
 
   if (profile) {
     if (profile.name && profile.name.trim()) ctx.name = profile.name.trim();
@@ -489,15 +587,6 @@ export interface SendChatOptions {
   endpoint?: string;
 }
 
-function readApiToken(): string {
-  if (typeof window === "undefined") return "";
-  try {
-    return window.localStorage.getItem(API_TOKEN_STORAGE_KEY)?.trim() ?? "";
-  } catch {
-    return "";
-  }
-}
-
 /**
  * Call the backend and return the coach's reply text.
  * Throws on a network error, non-OK status, or an empty reply (the caller keeps
@@ -512,7 +601,9 @@ export async function sendChat(
   const doFetch = options.fetchImpl ?? fetch;
   const endpoint = options.endpoint ?? "/api/chat";
   const headers: Record<string, string> = { "content-type": "application/json" };
-  const apiToken = readApiToken();
+  // Shared resolver: server-injected token (logged-in → no manual key) first,
+  // then the user's own stored key. Single source of truth with analyzeMeal.
+  const apiToken = resolveApiToken();
   if (apiToken) headers["X-Health-App-Token"] = apiToken;
 
   const res = await doFetch(endpoint, {

@@ -1,16 +1,19 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { getPhoto } from "@/lib/photoStore";
 
 interface Props {
   photoId: string;
   alt?: string;
   className?: string;
+  fallback?: ReactNode;
+  onBlobLoaded?: (blob: Blob) => void;
 }
 
 /** Loads a photo blob from IndexedDB and renders it, managing the object URL. */
-export function PhotoImage({ photoId, alt = "", className }: Props) {
+export function PhotoImage({ photoId, alt = "", className, fallback, onBlobLoaded }: Props) {
   const [url, setUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -22,6 +25,7 @@ export function PhotoImage({ photoId, alt = "", className }: Props) {
         if (revoked || !blob) return;
         objectUrl = URL.createObjectURL(blob);
         setUrl(objectUrl);
+        onBlobLoaded?.(blob);
       })
       .catch(() => {
         /* ignore — show placeholder */
@@ -31,9 +35,11 @@ export function PhotoImage({ photoId, alt = "", className }: Props) {
       revoked = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [photoId]);
+  }, [onBlobLoaded, photoId]);
 
   if (!url) {
+    if (fallback) return <>{fallback}</>;
+
     return (
       <div
         className={`flex items-center justify-center bg-slate-100 text-slate-300 dark:bg-navy-800 dark:text-navy-600 ${className ?? ""}`}

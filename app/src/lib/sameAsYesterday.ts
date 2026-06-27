@@ -94,7 +94,12 @@ export function findYesterdayMeal(
   yesterdayKey: string,
   slot: MealType,
 ): Meal | null {
-  const sameSlot = meals.filter((m) => m.date === yesterdayKey && m.type === slot);
+  // Only EATEN meals are "what the user actually ate yesterday" — a not-yet-eaten
+  // PLAN (status "planned", AIプランナー 第3陣D) must not be copied as a real past
+  // meal. ABSENT status → eaten (unchanged for every pre-feature/logged meal).
+  const sameSlot = meals.filter(
+    (m) => m.date === yesterdayKey && m.type === slot && m.status !== "planned",
+  );
   if (sameSlot.length === 0) return null;
   // Newest first, so "the meal" for a slot is the latest logged that day.
   const byNewest = [...sameSlot].sort((a, b) =>

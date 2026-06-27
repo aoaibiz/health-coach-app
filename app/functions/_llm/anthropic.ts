@@ -1,18 +1,6 @@
-// ============================================================================
-// LEGACY / OPTIONAL PROVIDER — NOT the default runtime path.
-// ----------------------------------------------------------------------------
-// The DEFAULT, active meal-vision path is the subscription Codex CLI provider
-// (functions/_llm/codex.ts), which needs NO paid API key. This Anthropic
-// provider is kept as an OPTIONAL alternative for self-hosters who would rather
-// call the Anthropic Messages API directly; it is inert unless explicitly wired
-// up and requires an `ANTHROPIC_API_KEY`. It is intentionally NOT deleted (it
-// still compiles and works), but OSS readers should treat the Codex path as the
-// one to start from. See the root README "LLM providers" note.
-// ============================================================================
+// AnthropicProvider — the real meal-vision adapter.
 //
-// AnthropicProvider — the meal-vision adapter for the Anthropic Messages API.
-//
-// Swappable by env:
+// Swappable by env (PRD §3.3):
 //   - model id  ← MEAL_VISION_MODEL  (default "claude-haiku-4-5"; override by env)
 //   - api key   ← ANTHROPIC_API_KEY  (server-side runtime env ONLY; never logged,
 //                  never hardcoded, never shipped to the client or committed)

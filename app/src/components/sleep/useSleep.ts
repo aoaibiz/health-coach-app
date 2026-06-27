@@ -8,6 +8,7 @@ import {
   saveSleepForDate,
 } from "@/lib/sleepLog";
 import type { SleepLog } from "@/lib/types";
+import { DATA_CHANGED_EVENT } from "@/lib/syncData";
 
 /**
  * Manages the sleep record for a given day. Mirrors useWorkout's shape: loads the
@@ -25,9 +26,13 @@ export function useSleep(date: string) {
     setReady(true);
     window.addEventListener("focus", refresh);
     window.addEventListener("storage", refresh);
+    // In-tab login restore doesn't fire `storage`; listen for the same-document
+    // signal so sleep data appears right after login without a reload.
+    window.addEventListener(DATA_CHANGED_EVENT, refresh);
     return () => {
       window.removeEventListener("focus", refresh);
       window.removeEventListener("storage", refresh);
+      window.removeEventListener(DATA_CHANGED_EVENT, refresh);
     };
   }, []);
 

@@ -109,7 +109,13 @@ function installFakeIndexedDB(): { stores: Map<string, Store> } {
   return { stores };
 }
 
-import { deleteAvatar, getAvatar, makeAvatarId, putAvatar } from "./avatarStore";
+import {
+  deleteAvatar,
+  getAvatar,
+  makeAvatarId,
+  putAvatar,
+  resolveAvatarUrl,
+} from "./avatarStore";
 
 describe("avatarStore — IndexedDB round-trip (gap #1)", () => {
   beforeEach(() => {
@@ -144,5 +150,53 @@ describe("avatarStore — IndexedDB round-trip (gap #1)", () => {
 
     await deleteAvatar(id);
     expect(await getAvatar(id)).toBeNull();
+  });
+});
+
+// Issue ③: the avatar must follow the user across devices. New saves embed the
+// image as a SYNCED data: URL on the profile; resolveAvatarUrl prefers it (no
+// IndexedDB touch), falling back to the legacy device-local blob.
+describe("resolveAvatarUrl — synced data URL preferred over legacy blob (issue ③)", () => {
+  beforeEach(() => {
+    installFakeIndexedDB();
+    // resolveObjectURL is only needed for the legacy-blob branch.
+    vi.stubGlobal("URL", {
+      createObjectURL: () => "blob:fake-object-url",
+      revokeObjectURL: () => undefined,
+    });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns null for a profile with no avatar", async () => {
+    expect(await resolveAvatarUrl(null)).toBeNull();
+    expect(await resolveAvatarUrl({})).toBeNull();
+  });
+
+  it("uses the synced data URL directly (no object URL to revoke)", async () => {
+    const dataUrl = "data:image/jpeg;base64,AAAA";
+    const res = await resolveAvatarUrl({ avatarDataUrl: dataUrl });
+    expect(res).toEqual({ url: dataUrl, revoke: false });
+  });
+
+  it("prefers the synced data URL even when a legacy blob id is also present", async () => {
+    const blob = new Blob(["legacy"], { type: "image/jpeg" });
+    const id = await putAvatar(blob);
+    const dataUrl = "data:image/jpeg;base64,BBBB";
+    const res = await resolveAvatarUrl({ avatarDataUrl: dataUrl, avatarPhotoId: id });
+    expect(res).toEqual({ url: dataUrl, revoke: false });
+  });
+
+  it("falls back to the legacy IndexedDB blob (object URL, revoke:true)", async () => {
+    const blob = new Blob(["legacy"], { type: "image/jpeg" });
+    const id = await putAvatar(blob);
+    const res = await resolveAvatarUrl({ avatarPhotoId: id });
+    expect(res).toEqual({ url: "blob:fake-object-url", revoke: true });
+  });
+
+  it("returns null when the legacy blob is gone (deleted/other device)", async () => {
+    const res = await resolveAvatarUrl({ avatarPhotoId: "avatar-missing" });
+    expect(res).toBeNull();
   });
 });

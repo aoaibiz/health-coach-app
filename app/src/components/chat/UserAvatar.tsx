@@ -1,14 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getAvatar } from "@/lib/avatarStore";
+import { resolveAvatarUrl } from "@/lib/avatarStore";
 import { avatarInitial } from "@/lib/profileView";
 import type { Profile } from "@/lib/types";
 
 /**
- * The user's chat avatar: loads the profile photo blob from IndexedDB (same
- * store as meal/profile photos) and renders it; falls back to the display-name
- * initial on a neutral circle when there's no photo (or while loading).
+ * The user's chat avatar: prefers the SYNCED data URL embedded on the profile
+ * (so it follows the user across devices), falling back to the legacy
+ * device-local IndexedDB blob, then to the display-name initial on a neutral
+ * circle when there's no photo (or while loading).
  */
 export function UserAvatar({
   profile,
@@ -18,20 +19,30 @@ export function UserAvatar({
   className?: string;
 }) {
   const [url, setUrl] = useState<string | null>(null);
+  const avatarDataUrl = profile?.avatarDataUrl;
   const photoId = profile?.avatarPhotoId;
 
   useEffect(() => {
-    if (!photoId) {
+    if (!avatarDataUrl && !photoId) {
       setUrl(null);
       return;
     }
     let revoked = false;
     let objectUrl: string | null = null;
-    getAvatar(photoId)
-      .then((blob) => {
-        if (revoked || !blob) return;
-        objectUrl = URL.createObjectURL(blob);
-        setUrl(objectUrl);
+    resolveAvatarUrl({ avatarDataUrl, avatarPhotoId: photoId })
+      .then((res) => {
+        if (!res) return;
+        if (res.revoke) {
+          // If cleanup already ran (revoked), revoke right here — the cleanup saw
+          // objectUrl===null and couldn't, so a late resolve would leak.
+          if (revoked) {
+            URL.revokeObjectURL(res.url);
+            return;
+          }
+          objectUrl = res.url; // cleanup will revoke it.
+        }
+        if (revoked) return;
+        setUrl(res.url);
       })
       .catch(() => {
         /* fall back to the initial */
@@ -40,7 +51,7 @@ export function UserAvatar({
       revoked = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [photoId]);
+  }, [avatarDataUrl, photoId]);
 
   if (url) {
     // eslint-disable-next-line @next/next/no-img-element

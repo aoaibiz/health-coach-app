@@ -6,7 +6,9 @@ import { calcTargets } from "@/lib/nutrition";
 import { sumIntake } from "@/lib/intake";
 import { workoutBurn } from "@/lib/burn";
 import { totalVolume, totalReps, weightedExerciseCount } from "@/lib/workout";
+import { isMealEaten } from "@/lib/mealStatus";
 import type { Meal, NutritionTargets, Profile, Workout } from "@/lib/types";
+import { DATA_CHANGED_EVENT } from "@/lib/syncData";
 
 export interface DailyData {
   profile: Profile | null;
@@ -50,14 +52,23 @@ export function useDailyData(date: string): { data: DailyData; ready: boolean } 
     // listener pattern in useChat / MealEditor.
     window.addEventListener("focus", refresh);
     window.addEventListener("storage", refresh);
+    // Same-document login restore (mergeOnLogin) writes localStorage in THIS tab,
+    // which does not fire `storage` — listen for the in-tab signal too so data
+    // appears right after login with no manual reload.
+    window.addEventListener(DATA_CHANGED_EVENT, refresh);
     return () => {
       window.removeEventListener("focus", refresh);
       window.removeEventListener("storage", refresh);
+      window.removeEventListener(DATA_CHANGED_EVENT, refresh);
     };
   }, []);
 
   const data = useMemo<DailyData>(() => {
     const dayMeals = meals.filter((m) => m.date === date);
+    // EATEN-only for the nutrition aggregations/flags: a not-yet-eaten PLAN
+    // (status "planned", AIプランナー 第3陣D) shows on the 食事画面 but must not count
+    // toward 摂取/達成 here — mirrors sumIntake's exclusion and the workout `isDone`.
+    const eatenMeals = dayMeals.filter(isMealEaten);
     const workout = workouts[date];
     const exercises = workout?.exercises ?? [];
 
@@ -66,7 +77,7 @@ export function useDailyData(date: string): { data: DailyData; ready: boolean } 
     const burn = profile ? workoutBurn(exercises, profile.weightKg) : { totalKcal: 0, perExercise: [] };
     const netKcal = intake.calories - burn.totalKcal;
 
-    const intakeIncludesEstimate = dayMeals.some(
+    const intakeIncludesEstimate = eatenMeals.some(
       (m) => m.nutrition?.estimated === true,
     );
 
@@ -80,7 +91,9 @@ export function useDailyData(date: string): { data: DailyData; ready: boolean } 
       totalReps: totalReps(exercises),
       hasWeighted: weightedExerciseCount(exercises) > 0,
       exerciseCount: exercises.filter((e) => e.name.trim() !== "").length,
-      mealCount: dayMeals.length,
+      // Discoverability count = EATEN meals (a not-yet-eaten plan isn't a logged
+      // meal yet — it shouldn't suppress the "食事タブから記録" nudge / hero hint).
+      mealCount: eatenMeals.length,
       intakeIncludesEstimate,
     };
   }, [meals, workouts, profile, date]);

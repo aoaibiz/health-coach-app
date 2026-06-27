@@ -10,6 +10,15 @@
 // server (functions/api/chat.ts shapeCoach) re-applies the SAME discipline as
 // defense-in-depth, so a tampered request can't inject prompt content either.
 
+// The synced coach avatar (avatarDataUrl) shares the profile avatar's size
+// budget — re-use the single source of truth (a plain numeric const; image.ts
+// has no module-load side effects, so this is SSR/node-test safe).
+import { AVATAR_MAX_DATA_URL_CHARS } from "./image";
+// Best-effort server backup on save (same pattern as storage.ts → saveProfile).
+// syncData imports THIS module too; the cycle is runtime-only (the function is
+// called, not evaluated at module load) — identical to storage.ts's cycle.
+import { pushSectionBestEffort } from "./syncData";
+
 /** Coach gender — enum only (matches the server CoachGender). */
 export type CoachGender = "female" | "male" | "unspecified";
 /** Coach behaviour style — enum only (matches the server CoachStyle). */
@@ -35,8 +44,26 @@ export const MAX_COACH_NAME_CHARS = 24;
 export interface CoachSettings {
   /** Chosen display name; absent/blank → default 健康マン. */
   name?: string;
-  /** IndexedDB key of the chosen avatar photo (reuses avatarStore/photoStore). */
+  /**
+   * IndexedDB key of a chosen avatar photo (reuses avatarStore/photoStore).
+   *
+   * @deprecated Device-local only — an IndexedDB blob ref does NOT cross devices,
+   * so a custom coach photo "disappeared" after a device switch (same bug the
+   * profile avatar had). New saves embed the image in `avatarDataUrl` (below),
+   * which rides the synced coachSettings blob. Still READ as a fallback so a
+   * coach photo saved before the change keeps showing on the SAME device, and
+   * migrated to `avatarDataUrl` on the next login (see avatarMigration.ts).
+   */
   avatarPhotoId?: string;
+  /**
+   * Custom coach avatar as a small compressed JPEG **data: URL** (see
+   * compressAvatarToDataUrl). UNLIKE avatarPhotoId this lives ON the settings
+   * object, so it is part of the synced coachSettings blob and follows the user
+   * across devices (fixes "コーチの写真が消える"). Bounded (≤ ~180KB) so it never
+   * bloats the per-section sync budget. Additive/optional → existing settings
+   * load fine. A custom photo (data URL or legacy blob) overrides any preset.
+   */
+  avatarDataUrl?: string;
   /** Preset avatar id, when a built-in preset (not a custom upload) was chosen. */
   presetAvatar?: string;
   gender?: CoachGender;
@@ -70,6 +97,17 @@ export function sanitizeCoachSettings(raw: unknown): CoachSettings {
   if (typeof r.avatarPhotoId === "string" && r.avatarPhotoId.trim()) {
     out.avatarPhotoId = r.avatarPhotoId.trim();
   }
+  // Synced custom coach avatar (data: URL). Accept ONLY a JPEG/PNG data: URL
+  // within the SAME size budget as the profile avatar, so a tampered/oversized
+  // value can never bloat the synced coachSettings blob. Mirrors the discipline
+  // image.ts applies on the way in (compressAvatarToDataUrl).
+  if (
+    typeof r.avatarDataUrl === "string" &&
+    /^data:image\/(jpeg|png|webp);base64,/.test(r.avatarDataUrl) &&
+    r.avatarDataUrl.length <= AVATAR_MAX_DATA_URL_CHARS
+  ) {
+    out.avatarDataUrl = r.avatarDataUrl;
+  }
   if (typeof r.presetAvatar === "string" && r.presetAvatar.trim()) {
     out.presetAvatar = r.presetAvatar.trim();
   }
@@ -94,7 +132,11 @@ export function loadCoachSettings(): CoachSettings {
   }
 }
 
-/** Persist the coach settings (sanitised on the way in). */
+/** Persist the coach settings (sanitised on the way in). Also fires a best-effort
+ *  server push so a coach-settings change (incl. the synced avatar) reaches the
+ *  server immediately, exactly like saveProfile — instead of only on the next
+ *  visibility/pagehide flush. No-op when logged out or before the section's
+ *  login-merge has run (the wipe fuse); never throws. */
 export function saveCoachSettings(settings: CoachSettings): void {
   if (typeof window === "undefined") return;
   try {
@@ -104,6 +146,12 @@ export function saveCoachSettings(settings: CoachSettings): void {
     );
   } catch {
     /* quota/serialisation errors are non-fatal for settings */
+  }
+  // Best-effort backup (gated by syncData's merge fuse; no-op when logged out).
+  try {
+    pushSectionBestEffort("coachSettings");
+  } catch {
+    /* a failed push leaves local intact; the next flush/login retries it */
   }
 }
 
@@ -184,6 +232,7 @@ export function coachConfigured(settings: CoachSettings | null | undefined): boo
     name ||
       (settings.gender && COACH_GENDERS.includes(settings.gender)) ||
       (settings.style && COACH_STYLES.includes(settings.style)) ||
+      (settings.avatarDataUrl && settings.avatarDataUrl.trim()) ||
       (settings.avatarPhotoId && settings.avatarPhotoId.trim()) ||
       (settings.presetAvatar && settings.presetAvatar.trim()),
   );

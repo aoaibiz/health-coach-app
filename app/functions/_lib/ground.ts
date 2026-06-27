@@ -31,6 +31,7 @@ import {
 } from "../_data/lookup";
 import { lookupAlias } from "./aliases";
 import { normalizeFull, normalizeName } from "./normalize";
+import { resolveStandardGrams } from "./standard-portions";
 import {
   cleanMicros,
   scaleMicros,
@@ -775,7 +776,12 @@ function modelSourcedItem(
  *     (medium) / 推定値 (low). Absurd/negative values are rejected → no-data.
  */
 export function groundDish(dish: IdentifiedDish): GroundedItem {
-  const grams = clampGrams(dish.grams);
+  // Resolve the portion BEFORE clamping the upper bound: a stated amount (>0) is
+  // kept verbatim, a missing/zero amount falls back to THIS food's SHARED standard
+  // portion (functions/_lib/standard-portions) — the SAME table the chat MEAL_LOG
+  // grounding uses, so an unstated コーヒー lands on 200g on BOTH paths → the SAME
+  // kcal (fixes the 8 vs 10 divergence). Then clampGrams bounds an absurd value.
+  const grams = clampGrams(resolveStandardGrams(dish.name, dish.grams).grams);
   const source: SourceKind = dish.source ?? "db";
 
   // ---- label / estimate: the model supplies the numbers (not the DB) --------

@@ -13,9 +13,11 @@ import { makeId, toDateKey } from "@/lib/date";
 import { compressImage } from "@/lib/image";
 import { analyzeMeal, blobToBase64, hasApiKey } from "@/lib/analyzeMeal";
 import { itemsToNutrition } from "@/lib/mealItems";
+import { mealImagePromptText } from "@/lib/mealCardImage";
 import { deletePhoto, getPhoto, putPhoto } from "@/lib/photoStore";
 import { MealItemsEditor } from "./MealItemsEditor";
 import { CameraIcon, CloseIcon, TrashIcon } from "../icons";
+import { DATA_CHANGED_EVENT } from "@/lib/syncData";
 
 /** Metadata from an AI estimate, attached to the saved nutrition for transparency. */
 interface EstimateMeta {
@@ -131,9 +133,13 @@ export function MealEditor({
     const refresh = () => setHasKey(hasApiKey());
     window.addEventListener("focus", refresh);
     window.addEventListener("storage", refresh);
+    // In-tab login restore can bring the access key back without a `storage`
+    // event; listen for the same-document signal so the key-hint clears.
+    window.addEventListener(DATA_CHANGED_EVENT, refresh);
     return () => {
       window.removeEventListener("focus", refresh);
       window.removeEventListener("storage", refresh);
+      window.removeEventListener(DATA_CHANGED_EVENT, refresh);
     };
   }, []);
   const [estimateMeta, setEstimateMeta] = useState<EstimateMeta | undefined>(() => {
@@ -289,13 +295,33 @@ export function MealEditor({
     previousPhotoIds.forEach((id) => {
       if (!photoIds.includes(id)) deletePhoto(id).catch(() => undefined);
     });
-    const meal: Meal = existing
-      ? { ...existing, type, text: trimmed, photoId: nextPhotoId, photoIds: nextPhotoIds, nutrition }
+    const nextExistingMeal: Meal | null = existing
+      ? {
+          ...existing,
+          type,
+          text: trimmed,
+          photoId: nextPhotoId,
+          photoIds: nextPhotoIds,
+          nutrition,
+          updatedAt: now.toISOString(),
+        }
+      : null;
+    const meal: Meal = nextExistingMeal
+      ? nextExistingMeal.generatedImagePrompt === mealImagePromptText(nextExistingMeal)
+        ? nextExistingMeal
+        : {
+            ...nextExistingMeal,
+            generatedImageId: undefined,
+            generatedImageDataUrl: undefined,
+            generatedImagePrompt: undefined,
+            generatedImageDataUrlFailedPrompt: undefined,
+          }
       : {
           id: makeId(),
           date,
           timestamp:
             date === toDateKey() ? now.toISOString() : `${date}T12:00:00.000Z`,
+          updatedAt: now.toISOString(),
           type,
           text: trimmed,
           photoId: nextPhotoId,
@@ -375,7 +401,7 @@ export function MealEditor({
         {previewUrls.length > 0 && (
           <div className="mb-3 grid grid-cols-2 gap-2">
             {previewUrls.map(({ id, url }) => (
-              <div key={id} className="relative overflow-hidden rounded-xl">
+              <div key={id} className="relative overflow-hidden rounded-xl bg-slate-100 dark:bg-navy-900">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src={url}

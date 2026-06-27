@@ -9,7 +9,7 @@ import {
   goalLabel,
   sexLabel,
 } from "@/lib/profileView";
-import { getAvatar } from "@/lib/avatarStore";
+import { resolveAvatarUrl } from "@/lib/avatarStore";
 import { formatNumber } from "@/lib/workout";
 import { Disclaimer } from "@/components/Disclaimer";
 import { PencilIcon, UserIcon } from "@/components/icons";
@@ -20,29 +20,40 @@ interface Props {
   onEdit: () => void;
 }
 
-/** Read-only avatar that loads its blob from IndexedDB (falls back to an icon). */
-function Avatar({ avatarPhotoId, name }: { avatarPhotoId?: string; name: string }) {
+/** Read-only avatar. Prefers the SYNCED data URL on the profile, falling back to
+ *  the legacy device-local IndexedDB blob, then to an icon. */
+function Avatar({ profile, name }: { profile: Profile; name: string }) {
   const [url, setUrl] = useState<string | null>(null);
+  const avatarDataUrl = profile.avatarDataUrl;
+  const avatarPhotoId = profile.avatarPhotoId;
 
   useEffect(() => {
     let objectUrl: string | null = null;
     let cancelled = false;
-    if (avatarPhotoId) {
-      getAvatar(avatarPhotoId)
-        .then((blob) => {
-          if (cancelled || !blob) return;
-          objectUrl = URL.createObjectURL(blob);
-          setUrl(objectUrl);
-        })
-        .catch(() => undefined);
-    } else {
-      setUrl(null);
-    }
+    resolveAvatarUrl({ avatarDataUrl, avatarPhotoId })
+      .then((res) => {
+        if (!res) {
+          if (!cancelled) setUrl(null);
+          return;
+        }
+        if (res.revoke) {
+          // If cleanup already ran (cancelled), revoke right here — the cleanup
+          // saw objectUrl===null and couldn't, so a late resolve would leak.
+          if (cancelled) {
+            URL.revokeObjectURL(res.url);
+            return;
+          }
+          objectUrl = res.url; // cleanup will revoke it.
+        }
+        if (cancelled) return;
+        setUrl(res.url);
+      })
+      .catch(() => undefined);
     return () => {
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [avatarPhotoId]);
+  }, [avatarDataUrl, avatarPhotoId]);
 
   return (
     <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-slate-100 text-slate-400 dark:border-navy-700 dark:bg-navy-800 dark:text-navy-300">
@@ -81,7 +92,7 @@ export function ProfileView({ profile, targets, onEdit }: Props) {
     <div className="space-y-5">
       {/* Identity + edit — a clear "登録済み" confirmation at a glance */}
       <div className="surface flex items-center gap-4 p-5">
-        <Avatar avatarPhotoId={profile.avatarPhotoId} name={displayName(profile)} />
+        <Avatar profile={profile} name={displayName(profile)} />
         <div className="min-w-0 flex-1">
           <p className="text-[11px] font-semibold uppercase tracking-wide text-accent dark:text-accent-light">
             プロフィール登録済み

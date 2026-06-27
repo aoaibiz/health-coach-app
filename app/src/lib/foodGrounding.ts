@@ -11,6 +11,7 @@
 import type { MealItem, NutritionSourceKind } from "./types";
 import { clampGrams, clampQty, setItemQty, toMealItem } from "./mealItems";
 import { findFood } from "../../functions/_lib/ground";
+import { resolveStandardGrams } from "../../functions/_lib/standard-portions";
 import { NUTRITION_SOURCE } from "../../functions/_data/lookup";
 import { makeId } from "./date";
 import type { MealLogItemPayload } from "./mealLogProtocol";
@@ -76,30 +77,25 @@ export function groundManualItem(id: string, name: string, grams: number): MealI
 const MAX_ITEM_KCAL = 10000;
 
 /**
- * Sensible generic fallback portion (grams) for a logged item whose effective
- * grams resolved to ≤ 0 or missing. THE INVARIANT this protects: a matched/known
- * (公式DB / labelled) food must NEVER log 0 kcal just because no quantity was
- * stated. When the model omits or zeroes the grams (the user said "焼き芋" with no
- * amount), we substitute a single, reasonable serving so the DB basis × default
- * yields a real, labelled number instead of basis × 0 = 0. ONLY the GRAMS are
- * defaulted — the per-100g basis (or the label/estimate anchor) is never invented.
- * A whole serving for most single foods sits around 100 g; this is deliberately a
- * portion ESTIMATE the user can correct in /meal, never a fabricated nutrient.
+ * Resolve the per-unit grams to log: a stated amount (> 0) is kept verbatim; a
+ * missing/zero amount falls back to THIS food's SHARED standard portion
+ * (functions/_lib/standard-portions), else the generic single-serving default.
+ *
+ * THE INVARIANT this protects: a matched/known (公式DB / labelled) food must NEVER
+ * log 0 kcal just because no quantity was stated. WHY the SHARED table: the AI
+ * photo/text analysis (functions/_lib/ground.groundDish) resolves an unstated
+ * portion through the EXACT SAME table, so an unstated コーヒー lands on 200g on
+ * BOTH paths → the SAME kcal (fixes the coach 8kcal vs AI解析 10kcal divergence).
+ * ONLY the GRAMS are defaulted — the per-100g basis / label/estimate anchor is
+ * never invented; a user-stated amount always wins. The chosen portion is still a
+ * 目安 the user can correct in /meal. Applied uniformly on every grounding branch
+ * (db, label/estimate, fallback), so the invariant holds for append + correct,
+ * single + multi photo + text. Returns the grams and whether a default kicked in.
  */
-const DEFAULT_PORTION_G = 100;
-
-/**
- * Resolve the per-unit grams to log: the clamped value, or DEFAULT_PORTION_G when
- * it is ≤ 0 / missing (clampGrams already maps NaN/≤0 to 0). This keeps a known
- * food from logging 0 kcal, applied uniformly on every grounding branch (db,
- * label/estimate, fallback) — and therefore on append + correct, single + multi
- * photo + text. Returns the chosen grams and whether the default kicked in.
- */
-function resolveGrams(rawGrams: number): { grams: number; defaulted: boolean } {
-  const clamped = clampGrams(rawGrams);
-  return clamped > 0
-    ? { grams: clamped, defaulted: false }
-    : { grams: DEFAULT_PORTION_G, defaulted: true };
+function resolveGrams(name: string, rawGrams: number): { grams: number; defaulted: boolean } {
+  // clampGrams first bounds an absurd/NaN value to a clean number (≤0 → 0); the
+  // shared resolver then keeps a positive amount or applies the standard portion.
+  return resolveStandardGrams(name, clampGrams(rawGrams));
 }
 
 /** A finite non-negative number ≤ ceil, else null (drops garbage/negatives/absurd). */
@@ -125,13 +121,14 @@ function cleanAnchor(v: number | undefined, ceil = Infinity): number | null {
  * qty is applied via setItemQty so the stored numbers reflect grams × qty exactly.
  */
 export function groundMealLogItem(payload: MealLogItemPayload): MealItem {
-  // Safety net: an item whose grams resolved to ≤ 0 / missing gets a sensible
-  // default portion (DEFAULT_PORTION_G) instead of computing 0. A DB food then
-  // logs basis × 100/100 (a real, 公式DB number), NOT 0 — without inventing the
-  // basis. Applies on EVERY branch below, so the invariant holds for db,
-  // label/estimate and the fallback alike (and on append + correct via
-  // buildLoggedMeal → groundMealLogItems).
-  const { grams, defaulted: portionDefaulted } = resolveGrams(payload.grams);
+  // Safety net: an item whose grams resolved to ≤ 0 / missing gets this food's
+  // SHARED standard portion (functions/_lib/standard-portions — the SAME table the
+  // AI analysis uses) instead of computing 0. A DB food then logs basis × grams/100
+  // (a real, 公式DB number), NOT 0 — without inventing the basis — and the chosen
+  // grams MATCH the AI-analysis path for the same food. Applies on EVERY branch
+  // below, so the invariant holds for db, label/estimate and the fallback alike
+  // (and on append + correct via buildLoggedMeal → groundMealLogItems).
+  const { grams, defaulted: portionDefaulted } = resolveGrams(payload.name, payload.grams);
   const qty = clampQty(payload.qty ?? 1);
   const source: NutritionSourceKind = payload.source ?? "db";
 

@@ -5,23 +5,21 @@
 // marked 推定/参考. We ALWAYS return a number with its source — never the old
 // "推定できませんでした" dead-end — and an estimate is never shown as a DB value.
 //
-// ┌─ TWO ACTIVE RUNTIME PATHS (same pure core) ─────────────────────────────┐
-// │ 1. OUR / FAMILY: the Node backend in ../../server/index.mjs builds a       │
-// │    CodexProvider (Codex CLI subscription — GPT-5.5 vision, NO paid API /    │
-// │    NO API key) and calls the PURE handleAnalyzeMeal() below.               │
-// │ 2. MEMBER SELF-HOST: a member's Cloudflare Pages deploy runs onRequestPost │
-// │    below, which builds the member's OWN-KEY Gemini provider (via the       │
-// │    worker-safe ../_llm/select-own) and calls the SAME handleAnalyzeMeal().  │
-// │    This path is ACTIVE and worker-safe — it never imports the Node-only    │
-// │    Codex providers.                                                        │
+// ┌─ ACTIVE RUNTIME PATH ───────────────────────────────────────────────────┐
+// │ The app now runs on the Node backend in ../../server/index.mjs, which     │
+// │ builds a CodexProvider (Codex CLI subscription — GPT-5.5 vision, NO paid   │
+// │ API / NO API key) and calls the PURE handleAnalyzeMeal() below.           │
+// │                                                                           │
+// │ The Cloudflare Pages `onRequestPost` + AnthropicProvider below are        │
+// │ LEGACY/UNUSED — kept only as an alternative reference. They are NOT the    │
+// │ runtime path and require an API key the project no longer uses.            │
 // └───────────────────────────────────────────────────────────────────────────┘
 //
 // Exports:
 //   - handleAnalyzeMeal(request, provider): pure, framework-free — the shared
-//     core used by BOTH the Node server and the member CF deploy (and unit tests
-//     with a MockProvider, no network, no real key).
-//   - onRequestPost: ACTIVE Cloudflare Pages entry for a member self-host deploy
-//     (token-gated, own-key Gemini).
+//     core used by the Node server AND unit tests (mock Request + MockProvider,
+//     no network, no real key). THIS is the live code path.
+//   - onRequestPost: DISABLED legacy Cloudflare Pages entry. Not active.
 
 import {
   groundDishes,
@@ -29,14 +27,8 @@ import {
   type Confidence,
   type SourceKind,
 } from "../_lib/ground";
-import type { MealVisionProvider } from "../_llm/provider";
 import type { Micros } from "../_lib/micros";
-// A member's Cloudflare Pages (Workers) deploy is ALWAYS own-key, so the
-// onRequestPost path uses the WORKER-SAFE selector (./select-own) that imports
-// ONLY the fetch-native Gemini provider — never ../_llm/select, which references
-// the Node-only Codex providers (node:child_process / node:fs) and would break
-// the Workers bundle. The Node server keeps using ../_llm/select.
-import { makeOwnKeyMealProvider, type ProviderEnv } from "../_llm/select-own";
+import type { MealVisionProvider } from "../_llm/provider";
 
 /** ~9MB base64 ≈ ~6.7MB binary — generous cap for a client-downsized 1280px JPEG. */
 const MAX_IMAGE_BASE64_CHARS = 9_000_000;
@@ -50,6 +42,12 @@ export interface AnalyzeMealRequestBody {
   /** Multiple base64 JPEGs for ONE meal (main + side + drink shots taken separately). */
   imageBase64List?: string[];
   text?: string;
+  /**
+   * Analysis MODE (AIプランナー Phase2 — 冷蔵庫の写真→献立提案). "fridge" tells the
+   * vision provider to identify the visible RAW ingredients (for a 献立) instead
+   * of analysing a prepared meal. Absent / "meal" → the existing meal path.
+   */
+  mode?: "meal" | "fridge";
 }
 
 export interface AnalyzedItem {
@@ -156,6 +154,10 @@ export async function handleAnalyzeMeal(
       ? body.text.trim()
       : undefined;
 
+  // Analysis mode (Phase2): only "fridge" switches behaviour; anything else is
+  // the default meal path, so an absent/garbage mode never breaks an existing call.
+  const mode: "meal" | "fridge" = body.mode === "fridge" ? "fridge" : "meal";
+
   // Collect the meal's image(s) into ONE ordered list: the multi-photo
   // `imageBase64List` plus any lone `imageBase64`, keeping only non-empty strings.
   // These are all photos of the SAME meal, analysed together as one.
@@ -194,7 +196,7 @@ export async function handleAnalyzeMeal(
   let dishes;
   let generatedBy: string;
   try {
-    const result = await provider.analyzeMeal({ imageBase64List, text });
+    const result = await provider.analyzeMeal({ imageBase64List, text, mode });
     dishes = result.dishes;
     generatedBy = result.generatedBy;
   } catch {
@@ -236,73 +238,25 @@ export async function handleAnalyzeMeal(
   return json(responseBody);
 }
 
-// ---- Cloudflare Pages Functions entry (member self-host deploy) -----------
-// This is the route a MEMBER's own Cloudflare Pages deploy runs. It selects the
-// AI provider from the deploy's env via select.ts (AI_MODE=own + AI_PROVIDER=
-// gemini → the member's own GEMINI_API_KEY; default → Codex), then calls the
-// SAME pure handleAnalyzeMeal() the Node server uses, so the validation +
-// grounding + anti-fabrication contract is identical.
-//
-// Access gate: mirror the Node server — the client must send X-Health-App-Token
-// matching the deploy's APP_ACCESS_TOKEN env. If unset, the route fails closed
-// (503) rather than running un-gated; on mismatch it returns 401. (Our/family
-// instances use the Node server's HEALTH_APP_TOKEN; a member's CF deploy sets
-// APP_ACCESS_TOKEN.)
+// ---- DISABLED LEGACY: Cloudflare Pages Functions entry --------------------
+// The live runtime is the Node server + CodexProvider (see ../../server/index.mjs).
+// Keep this exported so accidental CF deployment fails closed instead of
+// reactivating the paid Anthropic API path.
 
 interface PagesContext {
   request: Request;
-  env: AnalyzeMealEnv;
+  env: Record<string, unknown>;
 }
 
-/** The env a member's Pages deploy provides (provider selection + access gate). */
-type AnalyzeMealEnv = ProviderEnv & { APP_ACCESS_TOKEN?: string };
-
-/**
- * Constant-time-ish token comparison without Node crypto (CF Workers runtime).
- * Length check first (lengths are not secret), then a non-short-circuiting XOR
- * accumulate over the chars so the decision time doesn't leak the prefix.
- */
-function tokensMatch(provided: string | null, expected: string): boolean {
-  if (typeof provided !== "string") return false;
-  if (provided.length !== expected.length) return false;
-  let diff = 0;
-  for (let i = 0; i < expected.length; i++) {
-    diff |= provided.charCodeAt(i) ^ expected.charCodeAt(i);
-  }
-  return diff === 0;
-}
-
-/** ACTIVE CF Pages Functions handler — member self-host deploy entry. */
-export async function onRequestPost(context: PagesContext): Promise<Response> {
-  const expected = context.env.APP_ACCESS_TOKEN ?? "";
-  if (!expected) {
-    // Fail closed: no token configured → analysis unavailable (manual entry OK).
-    return json(
-      {
-        error: "analysis_unavailable",
-        message: "写真解析は準備中です。",
-      },
-      503,
-    );
-  }
-  if (!tokensMatch(context.request.headers.get("x-health-app-token"), expected)) {
-    return errorResponse("unauthorized", 401);
-  }
-
-  let provider: MealVisionProvider;
-  try {
-    provider = makeOwnKeyMealProvider(context.env);
-  } catch {
-    // Misconfigured AI_MODE/AI_PROVIDER → unavailable, never fabricates.
-    return json(
-      {
-        error: "analysis_unavailable",
-        message: "写真解析は準備中です。",
-      },
-      503,
-    );
-  }
-  return handleAnalyzeMeal(context.request, provider);
+/** DISABLED CF Pages Functions handler — use the Node server + Codex path. */
+export async function onRequestPost(_context: PagesContext): Promise<Response> {
+  return json(
+    {
+      error: "disabled",
+      message: "写真解析はNodeサーバーのCodex経路を使用します。",
+    },
+    410,
+  );
 }
 
 /** Re-exported for callers that want to show the data source name. */

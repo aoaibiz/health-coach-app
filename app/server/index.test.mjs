@@ -603,4 +603,11 @@ describe("Node server - POST /api/generate-meal-image route wiring", () => {
       await srv.close();
     }
   });
+
+  it("real Codex image runner is configured with temp cwd and a longer timeout", async () => {
+    const source = await (await import("node:fs/promises")).readFile(new URL("../functions/_llm/codex.ts", import.meta.url), "utf8");
+    expect(source).toContain("const DEFAULT_TIMEOUT_MS = 120_000");
+    expect(source).toContain('\"--cd\",');
+    expect(source).toContain("cwd,");
+  });
 });

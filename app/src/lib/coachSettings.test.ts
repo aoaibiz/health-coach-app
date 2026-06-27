@@ -70,6 +70,25 @@ describe("sanitizeCoachSettings — enum-restricted, additive", () => {
     expect(sanitizeCoachSettings("nope")).toEqual({});
     expect(sanitizeCoachSettings(42)).toEqual({});
   });
+
+  it("keeps a valid synced avatar data: URL (jpeg/png/webp, within budget)", () => {
+    const url = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ";
+    expect(sanitizeCoachSettings({ avatarDataUrl: url }).avatarDataUrl).toBe(url);
+    expect(
+      sanitizeCoachSettings({ avatarDataUrl: "data:image/png;base64,iVBORw0KGgo=" }).avatarDataUrl,
+    ).toBe("data:image/png;base64,iVBORw0KGgo=");
+  });
+
+  it("rejects a non-image / non-data: URL avatarDataUrl (anti-bloat / anti-injection)", () => {
+    expect(sanitizeCoachSettings({ avatarDataUrl: "https://evil.example/x.jpg" }).avatarDataUrl).toBeUndefined();
+    expect(sanitizeCoachSettings({ avatarDataUrl: "data:text/html;base64,PHNjcmlwdD4=" }).avatarDataUrl).toBeUndefined();
+    expect(sanitizeCoachSettings({ avatarDataUrl: "javascript:alert(1)" }).avatarDataUrl).toBeUndefined();
+  });
+
+  it("rejects an over-budget avatarDataUrl (never bloats the synced blob)", () => {
+    const huge = "data:image/jpeg;base64," + "A".repeat(200_000);
+    expect(sanitizeCoachSettings({ avatarDataUrl: huge }).avatarDataUrl).toBeUndefined();
+  });
 });
 
 describe("coachDisplayName — default fallback", () => {
@@ -99,6 +118,8 @@ describe("coachToPersona — presentation-only payload (no avatar id)", () => {
     expect(coachToPersona(null)).toBeUndefined();
     expect(coachToPersona({})).toBeUndefined();
     expect(coachToPersona({ avatarPhotoId: "avatar-only" })).toBeUndefined();
+    // A synced photo is presentation-only too — it must NOT reach the prompt.
+    expect(coachToPersona({ avatarDataUrl: "data:image/jpeg;base64,AAAA" })).toBeUndefined();
   });
   it("re-sanitises the name on the way out (last client gate)", () => {
     const p = coachToPersona({ name: "ボス\n悪意" });
@@ -115,6 +136,7 @@ describe("view/edit mode helpers (Fix 2 — saved confirmation view)", () => {
     expect(coachConfigured({ gender: "female" })).toBe(true);
     expect(coachConfigured({ style: "hardcore" })).toBe(true);
     expect(coachConfigured({ avatarPhotoId: "a-1" })).toBe(true);
+    expect(coachConfigured({ avatarDataUrl: "data:image/jpeg;base64,AAAA" })).toBe(true);
     expect(coachConfigured({ presetAvatar: "mascot" })).toBe(true);
   });
 

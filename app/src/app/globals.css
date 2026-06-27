@@ -22,12 +22,47 @@
   }
 
   body {
-    @apply bg-slate-50 text-slate-900 antialiased;
+    @apply text-slate-900 antialiased;
     @apply transition-colors duration-300;
+    /* Ambient, barely-there gradient mesh instead of a flat fill — two soft
+       accent/blue glows on a near-white base give the app depth and a premium,
+       non-AI-generated feel without distracting from content. Fixed so it never
+       scrolls. */
+    background-color: #f6f8fb;
+    background-image:
+      radial-gradient(60rem 60rem at 12% -8%, rgba(31, 157, 143, 0.07), transparent 60%),
+      radial-gradient(48rem 48rem at 108% 8%, rgba(90, 107, 176, 0.07), transparent 55%);
+    background-attachment: fixed;
+    /* Tighter optical kerning + system font smoothing for crisp Latin/numeric. */
+    letter-spacing: -0.011em;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: "cv11", "ss01";
   }
 
   .dark body {
-    @apply bg-navy-950 text-navy-50;
+    @apply text-navy-50;
+    background-color: #0c1126;
+    background-image:
+      radial-gradient(60rem 60rem at 12% -8%, rgba(45, 179, 163, 0.10), transparent 60%),
+      radial-gradient(48rem 48rem at 108% 8%, rgba(63, 79, 147, 0.16), transparent 55%);
+    background-attachment: fixed;
+  }
+
+  /* Headings get tighter tracking — the typographic hierarchy cue that reads as
+     "designed". Applies app-wide without touching any component markup. */
+  h1, h2, h3 {
+    letter-spacing: -0.02em;
+  }
+
+  /* Honour reduced-motion: disable the decorative animations/transitions. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
   }
 
   /* Keep numeric inputs comfortable on mobile, no spinners stealing space. */
@@ -42,33 +77,53 @@
 }
 
 @layer components {
-  /* A reusable surface for cards, sheets, and panels. */
+  /* A reusable surface for cards, sheets, and panels. Slightly translucent + a
+     subtle backdrop blur reads as layered "frosted" depth over the ambient body
+     gradient; the soft hairline ring + top inner-highlight catch light like a
+     real card. The hover lift is opt-in via .surface-interactive (below) so
+     static cards stay calm. */
   .surface {
-    @apply rounded-2xl bg-white shadow-card border border-slate-200/70;
+    @apply rounded-2xl border border-slate-200/70 bg-white/90 shadow-card backdrop-blur-xl;
+    @apply transition duration-300 ease-spring;
   }
   .dark .surface {
-    @apply bg-navy-900 shadow-card-dark border-navy-800;
+    @apply border-navy-800/80 bg-navy-900/80 shadow-card-dark;
+  }
+
+  /* Tappable/linked cards: lift + deepen shadow on hover, settle on press. */
+  .surface-interactive {
+    @apply cursor-pointer hover:-translate-y-0.5 hover:shadow-card-hover active:translate-y-0 active:scale-[0.995];
+  }
+  .dark .surface-interactive {
+    @apply hover:shadow-card-hover-dark;
   }
 
   .field {
-    @apply w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-base
-      text-slate-900 placeholder-slate-400 outline-none transition
-      focus:border-accent focus:ring-2 focus:ring-accent/30;
+    @apply w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-base
+      text-slate-900 placeholder-slate-400 outline-none transition duration-200
+      focus:border-accent focus:ring-4 focus:ring-accent/15 focus:shadow-sm
+      hover:border-slate-400;
   }
   .dark .field {
     @apply border-navy-700 bg-navy-800 text-navy-50 placeholder-navy-300/50
-      focus:border-accent-light focus:ring-accent-light/30;
+      hover:border-navy-600
+      focus:border-accent-light focus:ring-accent-light/20;
   }
 
+  /* Primary action: a soft vertical gradient + accent glow, a spring press, and
+     a faint top highlight. Reads as a deliberate, tappable "real button". */
   .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-accent px-4 py-2.5
-      text-sm font-semibold text-white shadow-sm transition
-      active:scale-[0.98] hover:bg-accent-dark disabled:opacity-50 disabled:active:scale-100;
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5
+      text-sm font-semibold text-white transition duration-200 ease-spring
+      bg-gradient-to-b from-accent-light to-accent shadow-glow-accent
+      hover:from-accent hover:to-accent-dark hover:shadow-card-hover
+      active:scale-[0.97] disabled:opacity-50 disabled:shadow-none disabled:active:scale-100;
   }
 
   .btn-ghost {
     @apply inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2
-      text-sm font-medium text-slate-600 transition hover:bg-slate-100 active:scale-[0.98];
+      text-sm font-medium text-slate-600 transition duration-200 ease-spring
+      hover:bg-slate-100 active:scale-[0.96];
   }
   .dark .btn-ghost {
     @apply text-navy-200 hover:bg-navy-800;
@@ -76,9 +131,33 @@
 
   .chip {
     @apply inline-flex items-center justify-center rounded-full px-3.5 py-1.5
-      text-sm font-medium transition active:scale-[0.97];
+      text-sm font-medium transition duration-200 ease-spring active:scale-[0.94];
+  }
+
+  /* Loading skeleton: a soft pulsing block with a moving sheen. Use for any
+     placeholder while data resolves (presentation-only). */
+  .skeleton {
+    @apply relative overflow-hidden rounded-xl bg-slate-200/70 dark:bg-navy-800/80;
+  }
+  .skeleton::after {
+    content: "";
+    @apply absolute inset-0 -translate-x-full animate-shimmer
+      bg-gradient-to-r from-transparent via-white/50 to-transparent dark:via-white/10;
   }
 }
+
+/* Stagger helper: children fade-in-up in sequence for a polished list reveal.
+   Opt-in via the .stagger class on a container (presentation-only). */
+.stagger > * {
+  animation: fade-in-up 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.stagger > *:nth-child(1) { animation-delay: 0.02s; }
+.stagger > *:nth-child(2) { animation-delay: 0.07s; }
+.stagger > *:nth-child(3) { animation-delay: 0.12s; }
+.stagger > *:nth-child(4) { animation-delay: 0.17s; }
+.stagger > *:nth-child(5) { animation-delay: 0.22s; }
+.stagger > *:nth-child(6) { animation-delay: 0.27s; }
+.stagger > *:nth-child(n + 7) { animation-delay: 0.3s; }
 
 /* Hide scrollbars on the horizontal chip rows while keeping scroll. */
 .no-scrollbar {

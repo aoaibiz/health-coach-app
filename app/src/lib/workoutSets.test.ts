@@ -8,6 +8,7 @@ import {
   setSetReps,
   setSetWeight,
   setsFor,
+  setsRepsCaption,
   setVolume,
   syncLegacyFields,
 } from "./workoutSets";
@@ -328,5 +329,31 @@ describe("setsFor — uniform per-set view (own array, else expanded legacy)", (
   it("a single-set exercise expands to exactly one set", () => {
     const legacy: Exercise = { id: "l", name: "ベンチプレス", sets: 1, reps: 5, weight: 100 };
     expect(setsFor(legacy, id)).toHaveLength(1);
+  });
+});
+
+describe("setsRepsCaption — plain「何セット×何回」for the figure guide", () => {
+  it("uniform reps → 'Nセット × M回' (no weight)", () => {
+    const sets = [makeSet(id(), 0, 10), makeSet(id(), 0, 10), makeSet(id(), 0, 10)];
+    expect(setsRepsCaption(sets)).toBe("3セット × 10回");
+  });
+
+  it("omits weight even on a weighted move (kg lives in the summary line)", () => {
+    const sets = [makeSet(id(), 60, 8), makeSet(id(), 60, 8)];
+    expect(setsRepsCaption(sets)).toBe("2セット × 8回");
+  });
+
+  it("varying reps → '全Nセット（合計M回）' so nothing is lost", () => {
+    const sets = [makeSet(id(), 0, 20), makeSet(id(), 0, 15), makeSet(id(), 0, 20)];
+    expect(setsRepsCaption(sets)).toBe("全3セット（合計55回）");
+  });
+
+  it("a single set reads as '1セット × M回'", () => {
+    expect(setsRepsCaption([makeSet(id(), 0, 12)])).toBe("1セット × 12回");
+  });
+
+  it("no usable reps (all 0) or empty → '' (caller hides the caption)", () => {
+    expect(setsRepsCaption([])).toBe("");
+    expect(setsRepsCaption([makeSet(id(), 0, 0), makeSet(id(), 0, 0)])).toBe("");
   });
 });

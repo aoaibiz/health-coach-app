@@ -436,10 +436,27 @@ describe("FABRICATION GUARD — unmatched dishes carry NO numbers", () => {
     expect(unmatched.source).toBeNull();
   });
 
-  it("zero/negative grams produce no fabricated calories", () => {
+  it("zero/negative grams default to a standard single serving, grounded from the DB (not fabricated)", () => {
+    // A missing/zero/negative portion for a MATCHED food now defaults to a single
+    // serving — the SAME shared resolver the chat MEAL_LOG path uses — so the two
+    // logging paths converge instead of one logging 0 kcal and the other 100g.
+    // 鶏卵 全卵 生 isn't a named drink/staple, so it takes the generic default 100g.
+    // The number is still the DB basis × the portion (142/100 × 100), never invented.
     const item = groundDish({ name: "鶏卵 全卵 生", grams: -5 });
-    expect(item.grams).toBe(0);
-    expect(item.kcal).toBe(0); // 142 * 0 = 0, grounded (not fabricated)
+    expect(item.grams).toBe(100); // generic single-serving default (no specific standard portion)
+    expect(item.kcal).toBe(142); // 142/100g × 100g — DB-grounded, not fabricated
+    expect(item.matched).toBe(true);
+  });
+
+  it("an unstated drink portion grounds to its SHARED standard serving (coach=AI consistency)", () => {
+    // The bug Ao caught: ブラックコーヒー grounded to the same DB row (4kcal/100g) on
+    // both paths, but each path guessed a different portion → 8 vs 10 kcal. With the
+    // shared standard portion (coffee 1杯 = 200g), an unstated coffee is now 200g →
+    // 8 kcal on the AI-analysis path, matching the coach path exactly.
+    const item = groundDish({ name: "ブラックコーヒー", grams: 0 });
+    expect(item.matched).toBe(true);
+    expect(item.grams).toBe(200); // shared standard portion for a drink (1杯=200g)
+    expect(item.kcal).toBe(8); // 4/100g × 200g — same as the coach path
   });
 });
 

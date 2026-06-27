@@ -145,3 +145,26 @@ export function summarizeSets(sets: SetEntry[], bodyweight: boolean): string {
   if (allSame) return `${fmt(sets[0])} ×${sets.length}セット`;
   return sets.map(fmt).join(" / ");
 }
+
+/**
+ * Plain-language「何セット×何回」caption for the figure-guide block (AIプランナー
+ * Phase3) — a deliberately weight-free, beginner-readable restatement of the
+ * volume, so the figure reads as "do THIS, this many sets × reps".
+ *
+ *   - uniform reps → "3セット × 10回"
+ *   - varying reps → "全3セット（合計55回）"  (so nothing is lost / invented)
+ *   - no usable reps (all 0) → "" (caller hides the caption)
+ *
+ * Pure + display-only: counts/sums come straight from the sets, never padded.
+ * Weight is intentionally OMITTED — the kg already shows in the main summary
+ * line; this line is the "how many" guidance next to the picture.
+ */
+export function setsRepsCaption(sets: SetEntry[]): string {
+  if (sets.length === 0) return "";
+  const reps = sets.map((s) => clampReps(s.reps));
+  const total = reps.reduce((a, b) => a + b, 0);
+  if (total === 0) return "";
+  const uniform = reps.every((r) => r === reps[0]);
+  if (uniform) return `${sets.length}セット × ${reps[0]}回`;
+  return `全${sets.length}セット（合計${total}回）`;
+}

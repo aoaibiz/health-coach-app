@@ -219,6 +219,8 @@ export interface Meal {
   date: string;
   /** Full ISO timestamp of when it was logged/eaten. */
   timestamp: string;
+  /** ISO timestamp of the last edit to this meal record. Optional for legacy meals. */
+  updatedAt?: string;
   type: MealType;
   text: string;
   /** IndexedDB key of the first/legacy photo, if one was attached. */
@@ -227,6 +229,20 @@ export interface Meal {
   photoIds?: string[];
   /** IndexedDB key of an AI-generated meal-title illustration. Real user photos always win. */
   generatedImageId?: string;
+  /**
+   * Compact synced data URL of the generated meal-title illustration. The full
+   * Blob stays device-local in IndexedDB; this small icon follows the meal
+   * across devices so mobile does not render a blank card after PC generation.
+   */
+  generatedImageDataUrl?: string;
+  /** Normalized menu text used to create generatedImageDataUrl. A mismatch means regenerate. */
+  generatedImagePrompt?: string;
+  /**
+   * Normalized menu text for which image generation succeeded locally, but the
+   * compact synced data URL could not be produced. Suppresses automatic retries
+   * for that prompt while leaving manual retry available.
+   */
+  generatedImageDataUrlFailedPrompt?: string;
   /** Optional user-entered calories + PFC for this meal (Phase 1: manual). */
   nutrition?: MealNutrition;
   /**

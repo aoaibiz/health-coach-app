@@ -90,9 +90,10 @@ describe("buildRecentDays — recent N days digest (excludes today)", () => {
     expect(days.length).toBe(1);
     expect(days[0].exerciseCount).toBe(1);
     expect(days[0].burnKcal).toBeUndefined(); // no weight → no burn figure
+    expect(days[0].workouts?.join(" ")).toContain("腕立て伏せ");
   });
 
-  it("attaches per-meal item detail for recent days only (grounds 「昨日と同じ」)", () => {
+  it("attaches per-meal item detail across the whole recent window (grounds 「昨日と同じ」)", () => {
     const withItems = (date: string): Meal => ({
       id: `${date}-items`,
       date,
@@ -115,12 +116,83 @@ describe("buildRecentDays — recent N days digest (excludes today)", () => {
     });
     const yesterday = days.find((d) => d.label.includes("6月20"));
     const older = days.find((d) => d.label.includes("6月16"));
-    // 昨日(<=MEAL_DETAIL_DAYS)は品目を持つ＝コーチが同じ内容で記録できる
+    // 昨日は品目を持つ＝コーチが同じ内容で記録できる
     expect(yesterday?.meals?.[0]?.items?.some((s) => s.includes("角ハイボール"))).toBe(true);
     expect(yesterday?.meals?.[0]?.type).toBe("夕");
-    // 古い日(>MEAL_DETAIL_DAYS)は集計のみ＝品目は付けない(トークン肥大防止)
+    // 直近7日内なら5日前も実品目を持つ＝コーチが「一昨日/先週の中身は見えない」と言わない。
     expect(older?.intakeKcal).toBe(336);
-    expect(older?.meals).toBeUndefined();
+    expect(older?.meals?.[0]?.items?.some((s) => s.includes("角ハイボール"))).toBe(true);
+  });
+
+  it("counts only eaten meals in the recent meal count and detail", () => {
+    const eaten: Meal = {
+      id: "eaten",
+      date: "2026-06-20",
+      timestamp: "2026-06-20T12:00:00.000Z",
+      type: "昼",
+      text: "",
+      nutrition: {
+        calories: 500,
+        items: [
+          { id: "i1", name: "鶏むね肉", grams: 100, qty: 1, kcal: 108, proteinG: 22, fatG: 2, carbG: 0, sourceKind: "db" },
+        ],
+      },
+    };
+    const planned: Meal = {
+      id: "planned",
+      date: "2026-06-20",
+      timestamp: "2026-06-20T18:00:00.000Z",
+      type: "夕",
+      text: "",
+      status: "planned",
+      nutrition: {
+        calories: 999,
+        items: [
+          { id: "i2", name: "予定のカレー", grams: 300, qty: 1, kcal: 999, proteinG: 20, fatG: 30, carbG: 120, sourceKind: "estimate" },
+        ],
+      },
+    };
+
+    const days = buildRecentDays({
+      todayKey: TODAY,
+      meals: [eaten, planned],
+      workouts: {},
+      sleep: {},
+      weightKg: null,
+    });
+
+    expect(days[0].intakeKcal).toBe(500);
+    expect(days[0].mealCount).toBe(1);
+    expect(days[0].meals?.[0]?.items).toEqual(["鶏むね肉100g"]);
+    expect(days[0].meals?.[0]?.items.join(" ")).not.toContain("予定のカレー");
+  });
+
+  it("attaches workout item detail and full sleep detail for recent days", () => {
+    const workouts: Record<string, Workout> = {
+      "2026-06-20": {
+        date: "2026-06-20",
+        exercises: [
+          { id: "e1", name: "ブルガリアンスクワット", sets: 3, reps: 10, weight: 0 },
+          { id: "e2", name: "明日の予定", sets: 2, reps: 12, weight: 0, status: "planned" },
+        ],
+        updatedAt: "2026-06-20T20:00:00.000Z",
+      },
+    };
+    const days = buildRecentDays({
+      todayKey: TODAY,
+      meals: [],
+      workouts,
+      sleep: { "2026-06-20": sleep("2026-06-20", "23:30", "07:10") },
+      weightKg: 70,
+      days: 7,
+    });
+    const yesterday = days.find((d) => d.label.includes("6月20"));
+
+    expect(yesterday?.exerciseCount).toBe(1);
+    expect(yesterday?.workouts?.some((s) => s.includes("ブルガリアンスクワット"))).toBe(true);
+    expect(yesterday?.workouts?.join(" ")).not.toContain("明日の予定");
+    expect(yesterday?.sleep).toBe("7時間40分");
+    expect(yesterday?.sleepDetail).toBe("23:30→07:10（7時間40分）");
   });
 });
 

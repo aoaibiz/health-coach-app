@@ -10,9 +10,11 @@ import type {
 } from "@/lib/types";
 import { calcTargets } from "@/lib/nutrition";
 import { API_TOKEN_STORAGE_KEY } from "@/lib/analyzeMeal";
+import { setApiToken } from "@/lib/apiTokenStore";
+import { pushSectionBestEffort } from "@/lib/syncData";
 import { apiKeyStatus, apiKeyStatusLabel } from "@/lib/profileView";
-import { compressImage } from "@/lib/image";
-import { deleteAvatar, getAvatar, putAvatar } from "@/lib/avatarStore";
+import { compressAvatarToDataUrl } from "@/lib/image";
+import { deleteAvatar, resolveAvatarUrl } from "@/lib/avatarStore";
 import { formatNumber } from "@/lib/workout";
 import { Disclaimer } from "@/components/Disclaimer";
 import { CameraIcon, TrashIcon } from "@/components/icons";
@@ -184,44 +186,73 @@ export function ProfileForm({ existing, onSave, onSaved, onCancel }: Props) {
   );
   const [goal, setGoal] = useState<Goal>(existing?.goal ?? "maintain");
   const [saved, setSaved] = useState(false);
-  const [apiToken, setApiToken] = useState("");
+  const [apiToken, setApiTokenState] = useState("");
 
-  // Avatar: blob lives in IndexedDB, only the id ref is kept on the profile.
-  const [avatarPhotoId, setAvatarPhotoId] = useState<string | undefined>(
-    existing?.avatarPhotoId,
+  // Avatar: the image is now embedded as a small data: URL ON the profile so it
+  // SYNCS across devices (legacy avatarPhotoId / IndexedDB no longer crosses
+  // devices). We still read a legacy blob ref as a fallback preview, and clean
+  // the old IndexedDB blob up when the avatar is replaced/removed/committed.
+  const [avatarDataUrl, setAvatarDataUrl] = useState<string | undefined>(
+    existing?.avatarDataUrl,
   );
+  // Explicit "the user cleared the avatar this session" flag. Needed because a
+  // legacy-only profile starts with avatarDataUrl === undefined, so removeAvatar
+  // setting it to undefined again is a no-op that wouldn't refresh the preview
+  // (it would keep showing the legacy blob). This flag suppresses the legacy
+  // fallback so the preview honestly reflects the removal.
+  const [avatarCleared, setAvatarCleared] = useState(false);
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [avatarBusy, setAvatarBusy] = useState(false);
   const avatarFileRef = useRef<HTMLInputElement>(null);
-  // Avatar staged this session but not yet committed — clean up on cancel/swap.
-  const stagedAvatarRef = useRef<string | null>(null);
 
   useEffect(() => {
     try {
-      setApiToken(window.localStorage.getItem(API_TOKEN_STORAGE_KEY) ?? "");
+      setApiTokenState(window.localStorage.getItem(API_TOKEN_STORAGE_KEY) ?? "");
     } catch {
-      setApiToken("");
+      setApiTokenState("");
     }
   }, []);
 
-  // Load a preview for the current avatar id.
+  // Load a preview: prefer the synced data URL; fall back to the legacy
+  // IndexedDB blob (only when no data URL is set AND the user hasn't cleared it
+  // this session).
   useEffect(() => {
-    let url: string | null = null;
     let cancelled = false;
-    if (avatarPhotoId) {
-      getAvatar(avatarPhotoId).then((blob) => {
-        if (cancelled || !blob) return;
-        url = URL.createObjectURL(blob);
-        setAvatarUrl(url);
-      });
-    } else {
+    let objectUrl: string | null = null;
+    if (avatarDataUrl) {
+      setAvatarUrl(avatarDataUrl);
+    } else if (avatarCleared) {
+      // User removed the avatar → show nothing, never re-show the legacy blob.
       setAvatarUrl(null);
+    } else {
+      // No data URL on the draft → show the legacy blob preview if one exists.
+      resolveAvatarUrl({ avatarPhotoId: existing?.avatarPhotoId })
+        .then((res) => {
+          if (!res) {
+            if (!cancelled) setAvatarUrl(null);
+            return;
+          }
+          if (res.revoke) {
+            // If cleanup already ran (cancelled), revoke right here — the cleanup
+            // saw objectUrl===null and couldn't, so a late resolve would leak.
+            if (cancelled) {
+              URL.revokeObjectURL(res.url);
+              return;
+            }
+            objectUrl = res.url; // cleanup will revoke it.
+          }
+          if (cancelled) return;
+          setAvatarUrl(res.url);
+        })
+        .catch(() => {
+          if (!cancelled) setAvatarUrl(null);
+        });
     }
     return () => {
       cancelled = true;
-      if (url) URL.revokeObjectURL(url);
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [avatarPhotoId]);
+  }, [avatarDataUrl, avatarCleared, existing?.avatarPhotoId]);
 
   async function handleAvatarFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -229,48 +260,35 @@ export function ProfileForm({ existing, onSave, onSaved, onCancel }: Props) {
     if (!file) return;
     setAvatarBusy(true);
     try {
-      const blob = await compressImage(file);
-      const id = await putAvatar(blob);
-      // Drop a previously staged (uncommitted) avatar.
-      if (stagedAvatarRef.current && stagedAvatarRef.current !== existing?.avatarPhotoId) {
-        await deleteAvatar(stagedAvatarRef.current).catch(() => undefined);
-      }
-      stagedAvatarRef.current = id;
-      setAvatarPhotoId(id);
+      const dataUrl = await compressAvatarToDataUrl(file);
+      if (!dataUrl) return; // undecodable / over budget → keep the current avatar.
+      setAvatarCleared(false); // a fresh pick un-clears.
+      setAvatarDataUrl(dataUrl);
       setSaved(false);
     } finally {
       setAvatarBusy(false);
     }
   }
 
-  async function removeAvatar() {
-    if (avatarPhotoId && avatarPhotoId !== existing?.avatarPhotoId) {
-      await deleteAvatar(avatarPhotoId).catch(() => undefined);
-    }
-    if (stagedAvatarRef.current === avatarPhotoId) stagedAvatarRef.current = null;
-    setAvatarPhotoId(undefined);
+  function removeAvatar() {
+    setAvatarDataUrl(undefined);
+    setAvatarCleared(true); // suppress the legacy fallback so the preview clears.
     setSaved(false);
   }
 
   function handleCancel() {
-    // Discard a staged avatar that was never saved.
-    if (stagedAvatarRef.current && stagedAvatarRef.current !== existing?.avatarPhotoId) {
-      deleteAvatar(stagedAvatarRef.current).catch(() => undefined);
-    }
     onCancel?.();
   }
 
   function handleApiTokenChange(value: string) {
+    setApiTokenState(value);
+    // Persist via the sync store: writes the raw token to the ORIGINAL
+    // localStorage key (so every existing reader is unchanged) AND stamps an
+    // updatedAt companion so the cross-device merge keeps the newest key. Then
+    // best-effort push it up so a later device wipe/re-add can restore it (no-op
+    // when logged out / before the login-merge gate opens; never throws).
     setApiToken(value);
-    try {
-      if (value.trim()) {
-        window.localStorage.setItem(API_TOKEN_STORAGE_KEY, value.trim());
-      } else {
-        window.localStorage.removeItem(API_TOKEN_STORAGE_KEY);
-      }
-    } catch {
-      // localStorage may be unavailable; the API will fail honestly with 401.
-    }
+    pushSectionBestEffort("apiToken");
   }
 
   const errors = useMemo<FormErrors>(() => {
@@ -330,9 +348,16 @@ export function ProfileForm({ existing, onSave, onSaved, onCancel }: Props) {
 
   function handleSubmit() {
     if (!valid) return;
-    // If the avatar was swapped on an existing profile, drop the old orphan.
-    if (existing?.avatarPhotoId && existing.avatarPhotoId !== avatarPhotoId) {
-      deleteAvatar(existing.avatarPhotoId).catch(() => undefined);
+    const hadLegacyAvatar = !!existing?.avatarPhotoId;
+    // Whether the avatar changed this session: a new synced data URL was set, or
+    // the user cleared it. If NEITHER happened, a legacy-only profile must KEEP
+    // its avatar (don't delete the blob, keep the avatarPhotoId ref) — otherwise
+    // editing an unrelated field would silently wipe the avatar.
+    const avatarChanged = avatarDataUrl !== existing?.avatarDataUrl || avatarCleared;
+    // Drop the legacy IndexedDB blob ONLY when the avatar was changed/cleared
+    // (it's being replaced by the data URL or removed). Best-effort; never blocks.
+    if (hadLegacyAvatar && avatarChanged) {
+      deleteAvatar(existing!.avatarPhotoId!).catch(() => undefined);
     }
     const trimmedName = name.trim();
     const profile: Profile = {
@@ -346,10 +371,14 @@ export function ProfileForm({ existing, onSave, onSaved, onCancel }: Props) {
       activityLevel,
       goal,
       bodyFatPct: bodyFatPct !== "" ? Number(bodyFatPct) : undefined,
-      avatarPhotoId,
+      // Synced avatar (follows the user across devices). The legacy avatarPhotoId
+      // is preserved ONLY when the avatar was untouched on a legacy-only profile,
+      // so an unrelated edit can't wipe it (it still shows via the legacy
+      // fallback and migrates to the synced data URL on the next re-pick).
+      avatarDataUrl,
+      avatarPhotoId: !avatarChanged && hadLegacyAvatar ? existing!.avatarPhotoId : undefined,
       updatedAt: new Date().toISOString(),
     };
-    stagedAvatarRef.current = null; // committed
     onSave(profile);
     setSaved(true);
     onSaved?.();
@@ -387,7 +416,7 @@ export function ProfileForm({ existing, onSave, onSaved, onCancel }: Props) {
             {avatarUrl && (
               <button
                 type="button"
-                onClick={() => void removeAvatar()}
+                onClick={removeAvatar}
                 aria-label="写真を削除"
                 className="absolute -right-1 -top-1 flex h-6 w-6 items-center justify-center rounded-full bg-slate-700 text-white shadow-sm active:scale-95 dark:bg-navy-700"
               >

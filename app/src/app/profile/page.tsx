@@ -9,6 +9,9 @@ import { useProfile } from "@/components/profile/useProfile";
 import { CoachSettingsForm } from "@/components/coach/CoachSettingsForm";
 import { useCoachSettings } from "@/components/coach/useCoachSettings";
 import { PushSettingsCard } from "@/components/push/PushSettingsCard";
+import { CalendarSettingsCard } from "@/components/settings/CalendarSettingsCard";
+import { DataBackupCard } from "@/components/settings/DataBackupCard";
+import { AccountCard } from "@/components/settings/AccountCard";
 import { initialProfileMode, type ProfileScreenMode } from "@/lib/profileView";
 
 export default function ProfilePage() {
@@ -35,6 +38,10 @@ export default function ProfilePage() {
             身体情報から1日の目標カロリーと PFC を計算します。
           </p>
         </header>
+
+        {/* ログイン中のアカウント（メールアドレス）を常に明示 — どのアカウントで
+            使っているか一目で分かるようにし、複数アカウントの取り違えを防ぐ。 */}
+        <AccountCard />
 
         {ready &&
           (mode === "view" && profile && targets ? (
@@ -66,6 +73,12 @@ export default function ProfilePage() {
 
         {/* 通知（LINE風 Web Push）— csrfToken は auth context から */}
         <PushSettingsCard />
+
+        {/* Googleカレンダー連携（Phase 1）— ログインとは別アカウントを選べる */}
+        <CalendarSettingsCard />
+
+        {/* データの書き出し / 取り込み — オフラインでも使える手動バックアップ */}
+        <DataBackupCard />
       </div>
     </AppShell>
   );

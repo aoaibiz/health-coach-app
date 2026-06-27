@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  sameChatHistory,
   sanitizeHistory,
   toWireMessages,
   type ChatMessage,
@@ -8,6 +9,26 @@ import {
 function msg(role: "user" | "assistant", content: string, i = 0): ChatMessage {
   return { id: `id-${i}`, role, content, createdAt: "2026-06-17T00:00:00.000Z" };
 }
+
+describe("sameChatHistory — live-restore no-op guard", () => {
+  it("true when ids + content match pairwise (already showing it → no re-render)", () => {
+    const a = [msg("user", "hi", 1), msg("assistant", "yo", 2)];
+    const b = [msg("user", "hi", 1), msg("assistant", "yo", 2)];
+    expect(sameChatHistory(a, b)).toBe(true);
+  });
+  it("false on different length (server merge added a turn → restore it)", () => {
+    const a = [msg("user", "hi", 1)];
+    const b = [msg("user", "hi", 1), msg("assistant", "yo", 2)];
+    expect(sameChatHistory(a, b)).toBe(false);
+  });
+  it("false when an id or content differs", () => {
+    expect(sameChatHistory([msg("user", "hi", 1)], [msg("user", "hi", 9)])).toBe(false);
+    expect(sameChatHistory([msg("user", "hi", 1)], [msg("user", "bye", 1)])).toBe(false);
+  });
+  it("true for two empty histories", () => {
+    expect(sameChatHistory([], [])).toBe(true);
+  });
+});
 
 describe("sanitizeHistory — defensive load", () => {
   it("keeps only well-formed ChatMessages", () => {

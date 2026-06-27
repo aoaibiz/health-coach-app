@@ -297,10 +297,17 @@ export function exerciseBurn(exercise: Exercise, bodyweightKg: number): Exercise
   };
 }
 
-/** Total burn across a workout, ignoring unnamed (blank) exercises. */
+/**
+ * Total burn across a workout, ignoring unnamed (blank) exercises AND not-yet-done
+ * PLANS (AIプランナー 第2陣C — `status === "planned"`). A plan is a future intent,
+ * not energy spent, so it must not inflate today's 消費カロリー until the user marks
+ * it 完了. ABSENT status means done (every pre-feature + chat-logged exercise), so
+ * this only drops the explicit "planned" ones — existing behaviour is unchanged.
+ */
 export function workoutBurn(exercises: Exercise[], bodyweightKg: number): WorkoutBurn {
   const perExercise = exercises
     .filter((e) => e.name.trim() !== "")
+    .filter((e) => e.status !== "planned")
     .map((e) => exerciseBurn(e, bodyweightKg));
   const totalKcal = perExercise.reduce((sum, b) => sum + b.caloriesBurned, 0);
   return { totalKcal, perExercise };

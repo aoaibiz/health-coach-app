@@ -5,17 +5,17 @@ import {
   clearAllLocalData,
   clearLastUserId,
   getLastUserId,
-  hasAnyUserData,
   setLastUserId,
   userIdentityKey,
 } from "./userScope";
 import { API_TOKEN_STORAGE_KEY } from "./analyzeMeal";
+import { API_TOKEN_UPDATED_AT_KEY } from "./apiTokenStore";
 import { COACH_SETTINGS_KEY } from "./coachSettings";
 import { WEIGHT_LOG_STORAGE_KEY } from "./weightLog";
 import { CHAT_STORAGE_KEY } from "./chatStore";
 import { SELECTED_DATE_KEY } from "./selectedDate";
 
-// ── localStorage shim (same pattern as the other storage tests) ─────────────
+// ── localStorage shim (same pattern as apiTokenStore.test.ts) ───────────────
 function installLocalStorage(seed: Record<string, string> = {}) {
   const map = new Map<string, string>(Object.entries(seed));
   Object.defineProperty(globalThis, "window", {
@@ -99,7 +99,9 @@ describe("userIdentityKey — robust to flat AND nested API shapes", () => {
     expect(userIdentityKey({ id: "u1", email: "a@b.com" })).toBe("id:u1");
   });
 
-  it("reads a nested user.id ({user:{id,email}} shape)", () => {
+  it("reads a nested user.id (LIVE backend shape {user:{id,email}})", () => {
+    // The live API returns { user: { id, email }, csrfToken }; authApi leaves
+    // state.user = { user: { id, email, ... } }. Must still resolve the id.
     expect(userIdentityKey({ user: { id: "u9", email: "x@y.com" } } as never)).toBe("id:u9");
   });
 
@@ -148,30 +150,8 @@ describe("lastUserId tracking", () => {
   });
 });
 
-describe("hasAnyUserData — fail-closed detector for unknown-identity logins", () => {
-  it("is false when no user-data keys are present", () => {
-    installLocalStorage({ "health-app:theme:v1": "dark", [LAST_USER_ID_KEY]: "id:u1" });
-    // theme + lastUserId are NOT user data → still false.
-    expect(hasAnyUserData()).toBe(false);
-  });
-
-  it("is true when ANY user-data key is present", () => {
-    installLocalStorage({ "health-app:profile:v1": "{\"name\":\"A\"}" });
-    expect(hasAnyUserData()).toBe(true);
-  });
-
-  it("is true for an empty-string value (key exists)", () => {
-    installLocalStorage({ [USER_DATA_KEYS[0]]: "" });
-    expect(hasAnyUserData()).toBe(true);
-  });
-
-  it("is false on SSR (no window)", () => {
-    expect(hasAnyUserData()).toBe(false);
-  });
-});
-
 describe("USER_DATA_KEYS — completeness (clear-list can't silently drift)", () => {
-  it("contains EVERY user-data section key + sleep + selectedDate", () => {
+  it("contains EVERY synced section key + sleep + selectedDate", () => {
     // If a new user-data localStorage key is added without listing it here, this
     // pins the regression: the clear would miss it and leak across users.
     const required = [
@@ -182,8 +162,11 @@ describe("USER_DATA_KEYS — completeness (clear-list can't silently drift)", ()
       COACH_SETTINGS_KEY,
       CHAT_STORAGE_KEY,
       API_TOKEN_STORAGE_KEY,
+      API_TOKEN_UPDATED_AT_KEY,
       "health-app:sleep:v1",
       SELECTED_DATE_KEY,
+      // Delete tombstones are per-user data and MUST be cleared on a user switch.
+      "health-app:deletions:v1",
     ];
     for (const k of required) expect(USER_DATA_KEYS).toContain(k);
   });

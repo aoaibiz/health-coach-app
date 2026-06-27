@@ -1,17 +1,17 @@
 // Recent-history context for the coach (Feature ②) — the fix for "コーチが今日(24h)
 // しか見れない". Builds a compact, token-bounded digest of the LAST FEW DAYS
 // (excluding today) from the same local stores the dashboard uses, so the coach
-// can see trends (摂取/運動/睡眠) without the prompt ballooning. Pure + testable:
-// the caller passes the already-loaded meals/workouts/sleep + the day keys, so
-// there is no DOM/storage access here.
+// can see trends and the recent day-by-day CONTENT (摂取/運動/睡眠) without the
+// prompt ballooning. Pure + testable: the caller passes the already-loaded
+// meals/workouts/sleep + the day keys, so there is no DOM/storage access here.
 //
 // HONESTY: every number is read straight from the user's own logged records and
-// summarised (kcal totals, counts, sleep length). A day with nothing logged is
-// simply omitted — nothing is invented for a quiet day.
+// summarised (kcal totals, counts, item/set detail, sleep range). A day with
+// nothing logged is simply omitted — nothing is invented for a quiet day.
 
 import type { Meal, SleepLog, Workout } from "./types";
 import type { RecentDaySummary } from "./chat";
-import { buildLoggedMealItems } from "./chat";
+import { buildLoggedMealItems, buildLoggedWorkoutItems } from "./chat";
 import { sumIntake } from "./intake";
 import { workoutBurn } from "./burn";
 import { formatDateLabel, shiftDateKey } from "./date";
@@ -23,12 +23,13 @@ export type { RecentDaySummary };
 export const RECENT_DAYS_DEFAULT = 7;
 
 /**
- * For how many of the most-recent days the digest also carries the per-meal item
- * detail (品目+grams), not just the kcal aggregate. Bounded (≠ the full 7-day
- * span) so the prompt stays small while still letting the coach honour "昨日と
- * 同じで記録" by grounding on the real items. Yesterday is always covered.
+ * For how many of the most-recent days the digest carries item-level detail
+ * (食事の品目+grams / 運動の種目+セット / 睡眠の時刻). This intentionally matches
+ * the full default recent window: a personal coach must not know "10種目" while
+ * being unable to say what those 10種目 were.
  */
-export const MEAL_DETAIL_DAYS = 3;
+export const RECENT_DETAIL_DAYS = RECENT_DAYS_DEFAULT;
+export const MEAL_DETAIL_DAYS = RECENT_DETAIL_DAYS;
 
 /**
  * Build the recent-days digest for the N days BEFORE `todayKey` (most-recent
@@ -52,13 +53,19 @@ export function buildRecentDays(args: {
   for (let i = 1; i <= span; i++) {
     const dateKey = shiftDateKey(todayKey, -i);
     const dayMeals = meals.filter((m) => m.date === dateKey);
+    const eatenMeals = dayMeals.filter((m) => m.status !== "planned");
     const workout = workouts[dateKey];
     const exercises = workout?.exercises ?? [];
     const sleepLog = sleep[dateKey] ?? null;
 
-    const intake = sumIntake(dayMeals);
+    const intake = sumIntake(eatenMeals);
     const hasIntake = intake.loggedCount > 0;
-    const exerciseCount = exercises.filter((e) => e.name.trim() !== "").length;
+    // DONE exercises only — a not-yet-done plan (status "planned", AIプランナー
+    // 第2陣C) is intent, not a trained session, so it doesn't count toward the
+    // recent-days運動 digest. workoutBurn already drops planned ones too.
+    const exerciseCount = exercises.filter(
+      (e) => e.name.trim() !== "" && e.status !== "planned",
+    ).length;
     const burnKcal = weightKg ? workoutBurn(exercises, weightKg).totalKcal : 0;
     const sleepSummary = summarizeSleep(sleepLog);
 
@@ -69,21 +76,31 @@ export function buildRecentDays(args: {
     const day: RecentDaySummary = { label: formatDateLabel(dateKey) };
     if (hasIntake) {
       day.intakeKcal = Math.round(intake.calories);
-      day.mealCount = dayMeals.length;
-      // Item-level detail only for the most-recent few days (token-bounded) so the
-      // coach can ground "昨日と同じで記録" on the real items+grams, not a guess.
+      day.mealCount = eatenMeals.length;
+      // Item-level detail for the full recent window so the coach can ground
+      // "昨日と同じで記録" on the real items+grams, not a guess.
       if (i <= MEAL_DETAIL_DAYS) {
-        const detail = buildLoggedMealItems(dayMeals);
+        const detail = buildLoggedMealItems(eatenMeals);
         if (detail) day.meals = detail;
       }
     }
     if (exerciseCount > 0) {
       day.exerciseCount = exerciseCount;
       if (weightKg) day.burnKcal = Math.round(burnKcal);
+      if (i <= RECENT_DETAIL_DAYS) {
+        let fallbackSetId = 0;
+        const detail = buildLoggedWorkoutItems(
+          exercises,
+          () => `${dateKey}-set-${fallbackSetId++}`,
+        );
+        if (detail) day.workouts = detail;
+      }
     }
     if (sleepSummary) {
-      // Only the length is needed in the digest line (keep it compact).
+      // Keep the compact length for backwards compatibility, and the full
+      // bedtime→wake range so the coach can discuss recovery accurately.
       day.sleep = sleepLengthOnly(sleepLog);
+      if (i <= RECENT_DETAIL_DAYS) day.sleepDetail = sleepSummary;
     }
     out.push(day);
   }

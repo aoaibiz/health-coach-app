@@ -210,6 +210,19 @@ describe("workoutBurn — sum across exercises", () => {
     expect(r.totalKcal).toBe(140);
   });
 
+  it("ignores PLANNED exercises (AIプランナー 第2陣C) — a plan burns nothing yet", () => {
+    const exercises: Exercise[] = [
+      ex({ id: "a", name: "ベンチプレス", durationMin: 30 }), // done (no status) → 140
+      ex({ id: "b", name: "ベンチプレス", durationMin: 30, status: "planned" }), // excluded
+    ];
+    const r = workoutBurn(exercises, 80);
+    expect(r.perExercise).toHaveLength(1);
+    expect(r.totalKcal).toBe(140);
+    // Completing the plan (status -> done) makes it count too.
+    const completed = exercises.map((e) => ({ ...e, status: "done" as const }));
+    expect(workoutBurn(completed, 80).totalKcal).toBe(280);
+  });
+
   it("empty workout → zero", () => {
     const r = workoutBurn([], 80);
     expect(r.totalKcal).toBe(0);

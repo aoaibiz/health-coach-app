@@ -82,13 +82,20 @@ function reconcileWithAnalysis(
     if (key && !byName.has(key)) byName.set(key, it);
   }
   return items.map((item) => {
-    // db items are DB-authoritative; their anchor numbers are ignored downstream.
-    if ((item.source ?? "db") === "db") return item;
     const match = byName.get(normName(item.name));
     // Only override when the analysis grounded an actual kcal for this item.
     if (!match || typeof match.kcal !== "number") return item;
+
+    const source = item.source ?? "db";
+    // A db analysis match stays DB-authoritative and recomputes from the official DB.
+    // But if the chat block wrongly tagged an unmatched supplement/product as db
+    // while the photo/text analysis grounded it as label/estimate (e.g. プロテイン),
+    // carry that sourced estimate through instead of logging a no-number 0 kcal row.
+    if (source === "db" && match.sourceKind === "db") return item;
+
     return {
       ...item,
+      source: source === "db" ? (match.sourceKind === "label" ? "label" : "estimate") : source,
       // Use the analysis's grounded portion + numbers as the candidate anchor, so
       // the logged label/estimate equals the analysis (not the chat model's retype).
       grams: match.grams,

@@ -1,100 +1,84 @@
-# health-coach app (frontend + Node server)
+# Health — 食事 & 筋トレ記録アプリ
 
-The `app/` half of the monorepo: a mobile-first PWA for food + workout coaching,
-plus the small Node server that backs its AI features. The companion auth /
-account / data backend lives in `../api` (a Cloudflare Worker + D1).
+個人用の、シンプルでミニマルな食事・筋トレ記録アプリ（MVP）。
+スマホ優先。画面データは端末内に保存し、写真解析/チャットだけ同一オリジンの Node サーバー経由で処理します。
 
-> See the repository **root `README.md`** for the project overview and the full
-> self-host quickstart. This file documents the `app/` subproject specifically.
+## 主な機能
 
-## What this subproject contains
+- **食事管理（食事タブ）** — テキストと写真（飲み物も）で記録。種類（朝/昼/夕/間食）、
+  時刻、本文、任意の写真を保存。カード表示・編集・削除に対応。日付スイッチャーで過去の日も閲覧。
+- **筋トレ（筋トレタブ）** — 種目ごとに セット数 × 回数 × 重量(kg) を `−/＋` でパチパチ入力。
+  「今日の成果」パネルで 総挙上量(Σ sets×reps×weight)・種目数・前日比 を一目で確認。
+- **テーマ切替** — 白基調（ライト）⇄ 紺基調（ダーク）。右上のボタンでアプリ全体を切替、設定は保存されます。
+- **ナビゲーション** — 画面下のタブバーで「食事」と「筋トレ」を行き来。
 
-- **Next.js 14 (App Router) + TypeScript + Tailwind** UI, exported as a static
-  site (`output: "export"` → `out/`). Deployable to Cloudflare Pages or served
-  by the bundled Node server.
-- A **Node server** (`server/index.mjs`, plain `node:http`, zero extra deps) that:
-  - serves the static export from `out/`, and
-  - hosts `POST /api/analyze-meal` and `POST /api/chat`, which call the
-    **subscription Codex CLI** (no paid API key) to identify dishes / power the
-    chat coach. Every nutrition number is then grounded against a bundled
-    nutrition DB (anti-fabrication) — the model only names dishes and estimates
-    grams.
-- **Auth, accounts, per-user data sync, and Web Push** are provided by the
-  `../api` Worker; the app talks to it cross-origin with credentials (see
-  `src/lib/authApi.ts`, `src/lib/push.ts`).
+## データ保存
 
-Local-first storage is still used as the on-device cache (meal metadata in
-`localStorage`, meal photos in `IndexedDB`), but — unlike the original MVP —
-this app DOES have a backend and account-based auth.
+- メタデータ（食事・筋トレの記録）→ `localStorage`
+- 食事の写真 → `IndexedDB`（localStorage を肥大化させないため。保存前に長辺1280pxへ縮小しJPEG圧縮）
 
-## Features
+すべて端末内に保存され、外部送信は一切ありません。
 
-- **Meals** — log by text and/or photo; photo analysis identifies dishes and
-  estimates portions, grounded to real nutrition data (never fabricated).
-- **Workouts** — per-exercise sets × reps × weight with a daily-total summary.
-- **Chat coach** — a conversational coach (subscription Codex CLI) that never
-  fabricates calorie/nutrition numbers.
-- **Calendar** — per-day view of meals / workouts / weight / nutrition deltas.
-- **Web Push** notifications (via the `api/` Worker).
-- **Light/dark theme**, persisted.
+## 技術スタック
 
-## LLM provider — AI mode
+- Next.js 14（App Router）+ TypeScript + Tailwind CSS
+- 静的エクスポート（`output: "export"`）を `server/index.mjs` で配信
+- `POST /api/analyze-meal` / `POST /api/chat` は Node サーバー側でトークン保護して処理
 
-`AI_MODE` (read once in `functions/_llm/select.ts`) picks which backend powers
-meal-photo analysis + the coach chat:
-
-- **`local-codex`** (default / unset) — the **subscription Codex CLI**
-  (`functions/_llm/codex.ts`, `functions/_llm/chat.ts`). Needs **no API key**.
-  This is the default for our/family instances; nothing about it changes.
-- **`own`** — bring **your own AI key** (for a member self-host deploy). Set
-  `AI_PROVIDER=gemini` and `GEMINI_API_KEY` to run on your own **Google Gemini**
-  key (`functions/_llm/gemini.ts`). Get a **FREE** key from
-  [Google AI Studio](https://aistudio.google.com/apikey). The meal/chat models
-  default to a free-tier Flash model (`gemini-2.0-flash`) and are overridable via
-  `MEAL_VISION_MODEL` / `CHAT_MODEL`. The same anti-fabrication grounding still
-  applies — the model only names dishes + estimates grams; the bundled DB
-  supplies the numbers.
-
-  > Note: Gemini's free tier has different terms than its paid tier — see
-  > Google's pricing/terms before relying on it.
-
-For a Cloudflare Pages self-host deploy, the `POST /api/analyze-meal` and
-`POST /api/chat` Pages Functions are gated by the `X-Health-App-Token` header vs
-the deploy's `APP_ACCESS_TOKEN` env (the same role `HEALTH_APP_TOKEN` plays for
-the Node server). The Anthropic Messages API provider
-(`functions/_llm/anthropic.ts`) remains as a LEGACY reference (requires
-`ANTHROPIC_API_KEY`) and is not wired into `select.ts` yet.
-
-## Setup & run
+## セットアップ & 起動
 
 ```bash
-cd app
+cd /home/info/health-app
 npm install
 
-# Dev server (http://localhost:3000)
+# 開発サーバー（http://localhost:3000）
 npm run dev
 ```
 
-Configure the environment via `.env` (see `.env.example`): at minimum set
-`NEXT_PUBLIC_HEALTH_API` (your `api/` Worker origin) and `HEALTH_APP_TOKEN`
-(shared secret for the Node server's AI routes).
-
-## Typecheck / build / serve
+## 型チェック / ビルド / 本番起動
 
 ```bash
-npm run typecheck      # tsc --noEmit, zero errors
-npm run test           # vitest
+# TypeScript エラーチェック（0 エラー）
+npm run typecheck      # = tsc --noEmit
 
-# Static export → out/
-npm run build
+# 本番ビルド（Next 静的エクスポート → out/、Node サーバー → dist/）
+npm run build:all
 
-# Compile the server-side handlers (functions/*) → dist/, then run the server
-npm run build:all      # next build && tsc -p tsconfig.server.json
-npm run serve          # node server/index.mjs  (defaults to PORT 8787)
+# 本番起動（HEALTH_APP_TOKEN は実値を環境変数で渡す）
+HEALTH_APP_TOKEN=... PORT=8787 npm start
 ```
 
-For a Cloudflare Pages deploy, build command `npm run build`, output directory
-`out`. The `public/_headers` file adds baseline security headers.
+公開時は `npm run build:all` のあと、`PORT` と `HEALTH_APP_TOKEN` を設定して
+`npm start`（= `node server/index.mjs`）で起動します。`npm start` は `next start` ではありません。
 
-> iOS Web Push requires the app to be **added to the Home Screen** (installed as
-> a PWA) before notifications can be enabled.
+## ディレクトリ構成
+
+```
+src/
+  app/
+    layout.tsx          ルートレイアウト（テーマ初期化スクリプト含む）
+    page.tsx            食事ページ（ホーム）
+    workout/page.tsx    筋トレページ
+    globals.css         Tailwind + デザインユーティリティ
+  components/
+    AppShell.tsx        ヘッダー + 下部タブバー
+    DateSwitcher.tsx    日付スイッチャー
+    ThemeProvider.tsx   テーマ状態（light/dark, 永続化）
+    PhotoImage.tsx      IndexedDB から写真を表示
+    icons.tsx           インライン SVG アイコン
+    meal/
+      useMeals.ts       食事の状態管理（localStorage）
+      MealEditor.tsx    追加/編集シート
+      MealCard.tsx      食事カード
+    workout/
+      useWorkout.ts     筋トレの状態管理（localStorage）
+      SummaryPanel.tsx  「今日の成果」パネル
+      ExerciseRow.tsx   種目入力行（ステッパー）
+  lib/
+    types.ts            ドメイン型
+    date.ts             日付ユーティリティ
+    storage.ts          localStorage 読み書き
+    photoStore.ts       IndexedDB（写真）
+    image.ts            写真の縮小・圧縮
+    workout.ts          総挙上量などの計算
+```

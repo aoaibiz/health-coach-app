@@ -21,6 +21,12 @@
 // 「自信過剰な数値の捏造」を生まないよう、PERSONA は最後に「助言は必ずユーザーの
 // 実ログに接地させる」と自らを縛る（SYSTEM_GUARDRAILS の安全フロアを補強する向き）。
 
+// The SHARED standard-portion hints (functions/_lib/standard-portions) cited
+// verbatim in the MEAL_LOG block below, so the coach uses the EXACT SAME 分量 for
+// an unstated amount as the AI photo/text analysis prompt does → the same item
+// grounds to the same grams → the same kcal on both paths (no 8 vs 10 split).
+import { STANDARD_PORTION_PROMPT_HINTS } from "../_lib/standard-portions";
+
 /** A single turn in the conversation, as sent by the client. */
 export interface ChatTurn {
   role: "user" | "assistant";
@@ -38,10 +44,34 @@ export const MEAL_LOG_CLOSE = "«/MEAL_LOG»";
 export const WORKOUT_LOG_OPEN = "«WORKOUT_LOG»";
 export const WORKOUT_LOG_CLOSE = "«/WORKOUT_LOG»";
 
+/** Sentinel that fences the structured WORKOUT_PLAN block (mirrors
+ *  src/lib/workoutPlanProtocol.ts — chat→運動メニュー提案, AIプランナー 第2陣C). The
+ *  coach proposes a workout MENU (future intent); on confirmation the client
+ *  bulk-inserts the exercises into 運動 as `planned` + reflects the time onto the
+ *  calendar. DISTINCT from WORKOUT_LOG (which records what already happened). */
+export const WORKOUT_PLAN_OPEN = "«WORKOUT_PLAN»";
+export const WORKOUT_PLAN_CLOSE = "«/WORKOUT_PLAN»";
+
+/** Sentinel that fences the structured MEAL_PLAN block (mirrors
+ *  src/lib/mealPlanProtocol.ts — chat→食事メニュー提案, AIプランナー 第3陣D, the twin
+ *  of WORKOUT_PLAN). The coach proposes a 献立 (朝/昼/夕, future intent); on
+ *  confirmation the client bulk-inserts the meals into 食事 as `planned` (each gets
+ *  a 「食べた」 button) + optionally reflects times onto the calendar. DISTINCT from
+ *  MEAL_LOG (which records what was already eaten). */
+export const MEAL_PLAN_OPEN = "«MEAL_PLAN»";
+export const MEAL_PLAN_CLOSE = "«/MEAL_PLAN»";
+
 /** Sentinel that fences the structured SLEEP auto-log block (mirrors
  *  src/lib/sleepLogProtocol.ts — chat→睡眠, text-driven). */
 export const SLEEP_LOG_OPEN = "«SLEEP_LOG»";
 export const SLEEP_LOG_CLOSE = "«/SLEEP_LOG»";
+
+/** Sentinel that fences the structured CALENDAR_PLAN block (mirrors
+ *  src/lib/calendarPlanProtocol.ts — chat→Googleカレンダー, text-driven). When the
+ *  user CONFIRMS they want today's plan put on their calendar, the coach appends
+ *  ONE block the client parses + forwards to the calendar API. */
+export const CALENDAR_PLAN_OPEN = "«CALENDAR_PLAN»";
+export const CALENDAR_PLAN_CLOSE = "«/CALENDAR_PLAN»";
 
 /**
  * One grounded line item from the photo analysis (the EXISTING /api/analyze-meal
@@ -71,6 +101,67 @@ export interface MealAnalysisContext {
   items?: MealAnalysisItem[];
   /** True when the totals include a 推定/ラベル value. */
   estimated?: boolean;
+}
+
+/**
+ * One visible ingredient identified from a 冷蔵庫/食材 photo (AIプランナー Phase2 —
+ * 冷蔵庫の写真→献立提案). This is a RAW ingredient the coach builds a 献立 from, NOT
+ * a meal item to log. Only the name is load-bearing (the coach reasons over which
+ * dishes are possible); grams is an optional on-hand hint (0/absent when unknown).
+ * These come from the grounded vision pipeline; the coach must NOT add ingredients
+ * that aren't in this list (anti-fabrication = use only what's actually visible).
+ */
+export interface FridgeIngredient {
+  /** Standard ingredient name (e.g. 卵, 鶏むね肉, 玉ねぎ). */
+  name: string;
+  /** Rough on-hand grams when known (0/absent = unknown — never a portion to eat). */
+  grams?: number;
+}
+
+/**
+ * The result of analysing a 冷蔵庫/食材 photo the user sent THIS turn (chat→献立).
+ * `ok:false` = the photo couldn't be read as a fridge/ingredient shot (the coach
+ * asks instead of inventing). `ingredients:[]` with ok:true = a readable photo
+ * but no ingredient was confidently identified (the coach asks what's in it). The
+ * coach proposes 献立 ONLY from `ingredients`; it never fabricates what's not here.
+ */
+export interface FridgeAnalysisContext {
+  ok: boolean;
+  ingredients?: FridgeIngredient[];
+}
+
+/**
+ * One of the user's EXISTING calendar events for today, read back from Google
+ * Calendar (events.list) for the 1日まるごと自動プラン flow. These are REAL events
+ * the user already has — the coach reads them to find FREE TIME before proposing a
+ * plan, and must NOT invent, move, or delete them. Times are verbatim from Google:
+ * a timed event has RFC3339 start/end; an all-day event has YYYY-MM-DD + allDay.
+ * The client sanitises the summary to a single safe line before it reaches here.
+ */
+export interface TodayCalendarEvent {
+  /** Event title (may be empty — an untitled busy block still blocks time). */
+  summary: string;
+  /** RFC3339 (timed) or YYYY-MM-DD (all-day) start, verbatim from the calendar. */
+  start: string;
+  /** RFC3339 / YYYY-MM-DD end, verbatim from the calendar. */
+  end: string;
+  /** True for an all-day event (no clock time to plan around precisely). */
+  allDay: boolean;
+}
+
+/**
+ * The user's day READ for the day-planner (AIプランナー「1日まるごと自動プラン」).
+ * `connected:false` = the user hasn't linked Google Calendar (the coach asks them
+ * to connect rather than inventing existing events). `events:[]` with connected:true
+ * = a connected-but-empty day (the coach plans freely). The coach reads these REAL
+ * events ONLY to find free time; it never fabricates one and never claims to have
+ * read the calendar when connected is false.
+ */
+export interface TodayPlanContext {
+  /** Whether the user's calendar is connected + readable. */
+  connected: boolean;
+  /** The real existing events for the day (empty when none / not connected). */
+  events?: TodayCalendarEvent[];
 }
 
 /**
@@ -183,8 +274,9 @@ export interface RegisteredProfile {
 /**
  * A compact one-day digest for the recent-history window (最近N日) the coach reads.
  * Mirrors the client's RecentDaySummary (src/lib/chat.ts). Every field optional +
- * already summarised/clamped by the client — no raw item lists reach the prompt,
- * so the window can't balloon, and a day with nothing logged is simply omitted.
+ * already summarised/clamped by the client. Recent content lists are capped before
+ * they reach the prompt, so the coach can know the day-by-day contents without
+ * ballooning the window. A day with nothing logged is simply omitted.
  */
 export interface RecentDaySummary {
   /** Friendly day label (e.g. "6月20日(金)"). */
@@ -195,11 +287,107 @@ export interface RecentDaySummary {
   exerciseCount?: number;
   /** Sleep length (e.g. "7時間0分") when logged that day. */
   sleep?: string;
+  /** Full sleep range (e.g. "23:00→07:00（8時間0分）") when logged that day. */
+  sleepDetail?: string;
   /**
    * Per-meal item detail for the most-recent few days only (item-capped by the
    * client) so the coach can ground "昨日と同じで記録" on the real items+grams.
    */
   meals?: LoggedMealContent[];
+  /** Per-exercise detail for recent days (name + compact set summary). */
+  workouts?: string[];
+}
+
+/**
+ * Average intake vs target over a trailing window (e.g. last 7/14/30/90/365 days),
+ * mirroring the client's NutritionWindowAvg (src/lib/coachContext.ts). Every
+ * field optional + already aggregated/clamped by the client. A window with no
+ * logged day carries only `days`/`loggedDays:0` so the coach never invents an
+ * average for a stretch with no data.
+ */
+export interface NutritionWindowAvg {
+  days: number;
+  loggedDays: number;
+  avgKcal?: number;
+  avgProteinG?: number;
+  avgFatG?: number;
+  avgCarbG?: number;
+  /** Mean daily protein shortfall vs target (g); 0 = on/above target. */
+  proteinDeficitG?: number;
+  /** Mean daily kcal gap vs target (avg − target); +surplus / −deficit. */
+  kcalVsTarget?: number;
+}
+
+/** Average sleep over a trailing window, mirroring the client's SleepWindowAvg. */
+export interface SleepWindowAvg {
+  days: number;
+  loggedDays: number;
+  avgDurationMin?: number;
+  shortSleepDays?: number;
+  longSleepDays?: number;
+}
+
+/** One muscle group's training frequency over the muscle window (mirrors the
+ *  client MuscleGroupStat). `group` is an enum-restricted body-region key. */
+export interface MuscleGroupStat {
+  group: string;
+  daysTrained: number;
+  sessions: number;
+  /** Days since last trained (in window); null = not trained in the window. */
+  daysSinceLast: number | null;
+}
+
+/** Direction of an exercise's load/volume trend (mirrors the client). */
+export type ProgressTrend = "up" | "down" | "flat" | "insufficient";
+
+/** Per-exercise progression over the window (mirrors the client ExerciseProgress).
+ *  All numbers are aggregated client-side from real logged sets; never invented. */
+export interface ExerciseProgress {
+  name: string;
+  group: string;
+  sessions: number;
+  bestVolumeKg: number;
+  topWeightKg: number;
+  recentVolumeKg: number;
+  firstVolumeKg: number;
+  trend: ProgressTrend;
+}
+
+/** Body-weight movement over the window (mirrors the client WeightTrendSummary). */
+export interface WeightTrendSummary {
+  startKg: number;
+  latestKg: number;
+  deltaKg: number;
+  spanDays: number;
+}
+
+/**
+ * The longitudinal coaching summary (Ao 2026-06-24 "本物のパーソナルトレーナー").
+ * Aggregates the user's WHOLE logged history into the trends a trainer reasons
+ * from — nutrition/sleep averages, recent + annual muscle-group frequency, lift
+ * progression, weight trend — so the coach can PROACTIVELY prescribe the next
+ * step instead of stating today's generalities. Mirrors src/lib/coachContext.ts
+ * CoachHistory. Every field optional; a quiet history yields a sparse summary the
+ * coach won't over-read. The endpoint sanitises/bounds it (shapeCoachHistory).
+ */
+export interface CoachHistorySummary {
+  nutrition?: NutritionWindowAvg[];
+  sleep?: SleepWindowAvg[];
+  muscleGroups?: MuscleGroupStat[];
+  /** Main groups with NO logged set in the muscle window (the 空白 to fill). */
+  untrainedGroups?: string[];
+  /** Total distinct workout days in the muscle window. */
+  workoutDaysInWindow?: number;
+  /** Size of the recent muscle window in days. */
+  muscleWindowDays?: number;
+  /** Annual muscle-group frequency. */
+  longTermMuscleGroups?: MuscleGroupStat[];
+  /** Total distinct workout days in the annual window. */
+  longTermWorkoutDays?: number;
+  /** Size of the annual muscle window in days. */
+  longTermWindowDays?: number;
+  progression?: ExerciseProgress[];
+  weightTrend?: WeightTrendSummary;
 }
 
 export interface ChatContext {
@@ -209,6 +397,12 @@ export interface ChatContext {
    * or the safety floor.
    */
   coach?: CoachPersona;
+  /**
+   * The longitudinal coaching summary (履歴ベースの傾向). Aggregated client-side
+   * from the user's WHOLE logged history so the coach can spot trends/gaps/stalls
+   * and proactively prescribe. Absent for a brand-new user. See CoachHistorySummary.
+   */
+  historySummary?: CoachHistorySummary;
   /**
    * The user's OWN registered身体情報 (height/weight/target-weight/age/sex/
    * body-type/activity/goal/body-fat). Present so the coach can confirm + ground
@@ -297,6 +491,24 @@ export interface ChatContext {
    * The numbers are already grounded; the coach never recomputes or invents them.
    */
   mealAnalysis?: MealAnalysisContext;
+  /**
+   * Grounded result of analysing a 冷蔵庫/食材 photo the user sent THIS turn
+   * (chat→献立, AIプランナー Phase2). When present, the user wants menu ideas FROM
+   * these ingredients — the coach suggests realistic 献立 using only what's listed,
+   * is honest about anything missing, and never logs this as a meal. SEPARATE from
+   * mealAnalysis (which is a prepared meal to confirm + log).
+   */
+  fridgeAnalysis?: FridgeAnalysisContext;
+  /**
+   * The user's day READ for the 1日まるごと自動プラン flow (AIプランナー). Present
+   * ONLY on a turn whose text was an explicit "plan my whole day" ask — the client
+   * reads the user's existing calendar events so the coach can plan around them.
+   * `connected:false` means the calendar isn't linked (the coach asks to connect,
+   * never invents events). The coach reads these REAL events to find free time and
+   * proposes a connected 食事＋運動＋タスク plan; on confirmation it writes ONE
+   * CALENDAR_PLAN block (the existing path). Absent on every non-day-plan turn.
+   */
+  todayPlan?: TodayPlanContext;
 }
 
 /**
@@ -436,6 +648,176 @@ const MEAL_SLOT_LABEL: Record<string, string> = {
   間食: "間食",
 };
 
+/** Muscle-group key → JP label (mirrors src/lib/muscleGroups MUSCLE_GROUP_LABEL).
+ *  Unknown keys fall back to the raw key so a future group still renders. */
+const MUSCLE_GROUP_LABEL_JA: Record<string, string> = {
+  chest: "胸",
+  back: "背中",
+  legs: "脚",
+  shoulders: "肩",
+  arms: "腕",
+  core: "腹・体幹",
+  cardio: "有酸素",
+  other: "その他",
+};
+
+function muscleLabel(group: string): string {
+  return MUSCLE_GROUP_LABEL_JA[group] ?? group;
+}
+
+/** Trend key → JP phrase for the progression line. */
+const TREND_LABEL: Record<string, string> = {
+  up: "伸びています",
+  down: "落ちています",
+  flat: "停滞ぎみ",
+  insufficient: "データ不足",
+};
+
+/**
+ * Render the longitudinal coaching summary (履歴ベースの傾向) into a compact block
+ * the coach grounds its PROACTIVE advice on. Only blocks with real signal render
+ * (a window with no logged days, an empty muscle list, etc. are skipped) so the
+ * coach never reads an invented trend. Returns null when nothing renders.
+ */
+export function formatCoachHistory(h: CoachHistorySummary | undefined): string | null {
+  if (!h || typeof h !== "object") return null;
+  const blocks: string[] = [];
+
+  // --- Nutrition averages per window (7/14/30/90/365d) ---
+  const nutLines: string[] = [];
+  for (const w of h.nutrition ?? []) {
+    if (!w || typeof w !== "object") continue;
+    if (typeof w.days !== "number") continue;
+    if (typeof w.loggedDays !== "number" || w.loggedDays <= 0) continue; // no data → skip
+    const parts: string[] = [];
+    if (typeof w.avgKcal === "number") {
+      let kcal = `平均${fmtKcal(w.avgKcal)}`;
+      if (typeof w.kcalVsTarget === "number" && w.kcalVsTarget !== 0) {
+        const sign = w.kcalVsTarget > 0 ? "+" : "";
+        kcal += `（目標比 ${sign}${Math.round(w.kcalVsTarget)}kcal）`;
+      }
+      parts.push(kcal);
+    }
+    const pfc: string[] = [];
+    if (typeof w.avgProteinG === "number") pfc.push(`P ${fmtG(w.avgProteinG)}`);
+    if (typeof w.avgFatG === "number") pfc.push(`F ${fmtG(w.avgFatG)}`);
+    if (typeof w.avgCarbG === "number") pfc.push(`C ${fmtG(w.avgCarbG)}`);
+    if (pfc.length > 0) parts.push(`平均PFC ${pfc.join(" / ")}`);
+    if (typeof w.proteinDeficitG === "number" && w.proteinDeficitG > 0) {
+      parts.push(`たんぱく質が毎日約${Math.round(w.proteinDeficitG)}g不足`);
+    }
+    if (parts.length === 0) continue;
+    nutLines.push(`  直近${Math.round(w.days)}日（記録${Math.round(w.loggedDays)}日）: ${parts.join(" / ")}`);
+  }
+  if (nutLines.length > 0) blocks.push(`栄養の傾向:\n${nutLines.join("\n")}`);
+
+  // --- Sleep averages per window (7/30/90/365d) ---
+  const sleepLines: string[] = [];
+  for (const w of h.sleep ?? []) {
+    if (!w || typeof w !== "object") continue;
+    if (typeof w.days !== "number") continue;
+    if (typeof w.loggedDays !== "number" || w.loggedDays <= 0) continue;
+    const parts: string[] = [];
+    if (typeof w.avgDurationMin === "number") {
+      parts.push(`平均${formatDurationPrompt(w.avgDurationMin)}`);
+    }
+    if (typeof w.shortSleepDays === "number" && w.shortSleepDays > 0) {
+      parts.push(`6時間未満 ${Math.round(w.shortSleepDays)}日`);
+    }
+    if (typeof w.longSleepDays === "number" && w.longSleepDays > 0) {
+      parts.push(`9時間超 ${Math.round(w.longSleepDays)}日`);
+    }
+    if (parts.length === 0) continue;
+    sleepLines.push(`  直近${Math.round(w.days)}日（記録${Math.round(w.loggedDays)}日）: ${parts.join(" / ")}`);
+  }
+  if (sleepLines.length > 0) blocks.push(`睡眠の傾向:\n${sleepLines.join("\n")}`);
+
+  // --- Muscle-group frequency + gaps (空白) ---
+  const mgLines: string[] = [];
+  for (const s of h.muscleGroups ?? []) {
+    if (!s || typeof s !== "object" || typeof s.group !== "string") continue;
+    const daysTrained = typeof s.daysTrained === "number" ? s.daysTrained : 0;
+    if (daysTrained <= 0) continue; // untrained groups are listed separately below
+    let line = `${muscleLabel(s.group)} ${Math.round(daysTrained)}日`;
+    if (typeof s.daysSinceLast === "number") {
+      line += s.daysSinceLast === 0 ? "（今日）" : `（最後は${Math.round(s.daysSinceLast)}日前）`;
+    }
+    mgLines.push(line);
+  }
+  if (typeof h.workoutDaysInWindow === "number" && h.workoutDaysInWindow >= 0) {
+    const span = typeof h.muscleWindowDays === "number" ? Math.round(h.muscleWindowDays) : 14;
+    const head = `直近${span}日の部位別頻度（運動日 ${Math.round(h.workoutDaysInWindow)}日）`;
+    if (mgLines.length > 0) blocks.push(`${head}:\n  ${mgLines.join(" / ")}`);
+  } else if (mgLines.length > 0) {
+    blocks.push(`部位別頻度:\n  ${mgLines.join(" / ")}`);
+  }
+  const untrained = (h.untrainedGroups ?? [])
+    .filter((g): g is string => typeof g === "string" && g.trim() !== "")
+    .map(muscleLabel);
+  if (untrained.length > 0) {
+    const span = typeof h.muscleWindowDays === "number" ? Math.round(h.muscleWindowDays) : 14;
+    blocks.push(`直近${span}日で鍛えていない部位（空白）: ${untrained.join("・")}`);
+  }
+
+  // --- Annual muscle-group frequency ---
+  const longMgLines: string[] = [];
+  for (const s of h.longTermMuscleGroups ?? []) {
+    if (!s || typeof s !== "object" || typeof s.group !== "string") continue;
+    const daysTrained = typeof s.daysTrained === "number" ? s.daysTrained : 0;
+    if (daysTrained <= 0) continue;
+    longMgLines.push(`${muscleLabel(s.group)} ${Math.round(daysTrained)}日`);
+  }
+  if (longMgLines.length > 0) {
+    const span = typeof h.longTermWindowDays === "number" ? Math.round(h.longTermWindowDays) : 365;
+    const workoutDays =
+      typeof h.longTermWorkoutDays === "number" ? `・運動日 ${Math.round(h.longTermWorkoutDays)}日` : "";
+    blocks.push(`過去${span}日の部位別頻度${workoutDays}:\n  ${longMgLines.join(" / ")}`);
+  }
+
+  // --- Per-exercise progression (伸び/停滞, annual window) ---
+  const progLines: string[] = [];
+  for (const p of h.progression ?? []) {
+    if (!p || typeof p !== "object" || typeof p.name !== "string" || !p.name.trim()) continue;
+    const trend = TREND_LABEL[p.trend] ?? "";
+    const bits: string[] = [];
+    if (typeof p.topWeightKg === "number" && p.topWeightKg > 0) {
+      bits.push(`最高${round1Prompt(p.topWeightKg)}kg`);
+    }
+    if (typeof p.recentVolumeKg === "number") {
+      bits.push(`直近 総挙上量${round1Prompt(p.recentVolumeKg)}kg`);
+    }
+    const sess = typeof p.sessions === "number" ? `${Math.round(p.sessions)}回` : "";
+    const detail = bits.length > 0 ? `（${bits.join(" / ")}）` : "";
+    progLines.push(`  ${p.name.trim()}${sess ? ` ${sess}` : ""}: ${trend}${detail}`);
+  }
+  if (progLines.length > 0) blocks.push(`種目の伸び（重量種目・過去1年）:\n${progLines.join("\n")}`);
+
+  // --- Weight trend ---
+  const wt = h.weightTrend;
+  if (wt && typeof wt === "object" && typeof wt.startKg === "number" && typeof wt.latestKg === "number") {
+    const delta = typeof wt.deltaKg === "number" ? wt.deltaKg : wt.latestKg - wt.startKg;
+    const dir = delta < 0 ? "減" : delta > 0 ? "増" : "横ばい";
+    const span = typeof wt.spanDays === "number" && wt.spanDays > 0 ? `約${Math.round(wt.spanDays)}日で` : "";
+    blocks.push(
+      `体重の推移: ${span}${round1Prompt(wt.startKg)}kg → ${round1Prompt(wt.latestKg)}kg（${delta > 0 ? "+" : ""}${round1Prompt(delta)}kg ${dir}）`,
+    );
+  }
+
+  return blocks.length > 0 ? blocks.join("\n") : null;
+}
+
+/** One decimal place for prompt rendering (avoids trailing .0 noise). */
+function round1Prompt(n: number): number {
+  return Math.round(n * 10) / 10;
+}
+
+function formatDurationPrompt(min: number): string {
+  const total = Math.max(0, Math.round(min));
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return m > 0 ? `${h}時間${m}分` : `${h}時間`;
+}
+
 /**
  * Render the client-supplied context into a compact Japanese block the model can
  * ground its numbers on. Only fields that are present are emitted — we never
@@ -527,6 +909,12 @@ export function formatChatContext(ctx: ChatContext | undefined): string | null {
   const recent = formatRecentDays(ctx.recentDays);
   if (recent) lines.push(`・最近の記録（直近の数日・参考）:\n${recent}`);
 
+  // Longitudinal trends (履歴ベースの傾向) — the aggregates a real trainer reasons
+  // from (栄養平均/部位頻度/空白/伸び停滞/体重推移). Only rendered when there's real
+  // signal; the coach uses it to proactively prescribe (PROACTIVE_COACHING_GUIDE).
+  const history = formatCoachHistory(ctx.historySummary);
+  if (history) lines.push(`・これまでの傾向（履歴の集計・参考）:\n${history}`);
+
   return lines.length > 0 ? lines.join("\n") : null;
 }
 
@@ -549,17 +937,26 @@ export function formatRecentDays(days: RecentDaySummary[] | undefined): string |
       const meals = typeof d.mealCount === "number" ? `(${Math.round(d.mealCount)}食)` : "";
       parts.push(`摂取${fmtKcal(d.intakeKcal)}${meals}`);
     }
-    if (typeof d.burnKcal === "number") {
+    if (typeof d.burnKcal === "number" || typeof d.exerciseCount === "number") {
       const ex = typeof d.exerciseCount === "number" ? `(${Math.round(d.exerciseCount)}種目)` : "";
-      parts.push(`運動${fmtKcal(d.burnKcal)}${ex}`);
+      const burn = typeof d.burnKcal === "number" ? fmtKcal(d.burnKcal) : "";
+      parts.push(`運動${burn}${ex}`);
     }
-    if (typeof d.sleep === "string" && d.sleep.trim()) parts.push(`睡眠 ${d.sleep.trim()}`);
+    const sleep =
+      typeof d.sleepDetail === "string" && d.sleepDetail.trim()
+        ? d.sleepDetail.trim()
+        : typeof d.sleep === "string" && d.sleep.trim()
+          ? d.sleep.trim()
+          : "";
+    if (sleep) parts.push(`睡眠 ${sleep}`);
     if (parts.length === 0) continue;
     let line = `  ${label}: ${parts.join(" / ")}`;
     // Item-level meal detail (recent days only) → sub-line, so the coach can copy
     // the exact items+grams for "昨日と同じで記録" instead of guessing.
     const mealDetail = formatLoggedMealItems(d.meals);
     if (mealDetail) line += `\n    └ ${mealDetail}`;
+    const workoutDetail = formatLoggedWorkoutItems(d.workouts);
+    if (workoutDetail) line += `\n    └ 運動: ${workoutDetail}`;
     lines.push(line);
   }
   return lines.length > 0 ? lines.join("\n") : null;
@@ -649,6 +1046,78 @@ export function formatMealAnalysis(meal: MealAnalysisContext | undefined): strin
 }
 
 /**
+ * Render the FRIDGE analysis (chat→献立, Phase2) into a block the coach proposes a
+ * 献立 from. It lists ONLY the ingredients the vision pipeline actually identified
+ * from the photo — the coach must build menus from these and NOT add ingredients
+ * that aren't here (anti-fabrication). Returns null when there's no fridge analysis
+ * (so the prompt omits the section). An ok:false / empty list yields an honest
+ * instruction to ASK rather than invent.
+ */
+export function formatFridgeAnalysis(fridge: FridgeAnalysisContext | undefined): string | null {
+  if (!fridge) return null;
+  if (!fridge.ok) {
+    return "（送られた写真は冷蔵庫／食材の写真として読み取れませんでした。食材が写っているか確認し、写っていなければ何があるか言葉で教えてもらってください。勝手に食材や献立を作らないこと。）";
+  }
+  const ingredients = fridge.ingredients ?? [];
+  if (ingredients.length === 0) {
+    return "（写真から食材をはっきり特定できませんでした。何があるか言葉で確認してください。見えていない食材を勝手に足さないこと。）";
+  }
+  const lines = ingredients.map((it) => {
+    const grams =
+      typeof it.grams === "number" && it.grams > 0 ? `（約${Math.round(it.grams)}g）` : "";
+    return `・${it.name}${grams}`;
+  });
+  return `写真から見えた食材（これだけが手元にある前提・あなたが足した物ではありません）:\n${lines.join("\n")}`;
+}
+
+/** Max events rendered into the prompt (bounds the block; a normal day has few). */
+const MAX_TODAY_EVENTS = 30;
+
+/** Render a single event's time for the prompt: "HH:MM〜HH:MM" for a timed event
+ *  (clock part of the RFC3339 string, used verbatim — no zone math, no invention),
+ *  or "終日" for an all-day event. Falls back to the raw start when unparseable. */
+function formatEventTime(ev: TodayCalendarEvent): string {
+  if (ev.allDay) return "終日";
+  const clock = (iso: string): string | null => {
+    // Pull HH:MM straight out of the RFC3339 string (the value the user's calendar
+    // returned). We do NOT re-zone it — the displayed local time is what Google sent.
+    const m = /T(\d{2}:\d{2})/.exec(iso);
+    return m ? m[1] : null;
+  };
+  const s = clock(ev.start);
+  const e = clock(ev.end);
+  if (s && e) return `${s}〜${e}`;
+  if (s) return `${s}〜`;
+  return typeof ev.start === "string" ? ev.start : "";
+}
+
+/**
+ * Render the user's EXISTING calendar events for the day-planner (1日まるごと自動
+ * プラン). The coach reads these REAL events to find FREE TIME — it must plan
+ * AROUND them, never move/delete/invent them. Returns null when there's no
+ * todayPlan context (the prompt omits the section). When the calendar isn't
+ * connected, returns an honest "ask the user to connect" instruction (the coach
+ * must NOT pretend it read a schedule). An empty connected day is stated plainly so
+ * the coach plans freely. Each summary is already a single safe line (client-sanitised).
+ */
+export function formatTodayEvents(plan: TodayPlanContext | undefined): string | null {
+  if (!plan) return null;
+  if (!plan.connected) {
+    return "（ユーザーはまだGoogleカレンダーを連携していないため、今日の既存の予定は読み取れませんでした。架空の予定を作らず、まず「マイページからカレンダーを連携すると、既存の予定を踏まえて空き時間に1日のプランを組めます」と案内してください。連携前でも、一般的な1日の流れの提案はできますが、それは『仮の案』であり実際の予定は確認できていないことを正直に添えてください。）";
+  }
+  const events = (plan.events ?? []).slice(0, MAX_TODAY_EVENTS);
+  if (events.length === 0) {
+    return "今日の既存の予定（カレンダーから取得）: 予定は入っていません（1日まるごと空いています）。この空き時間に食事・運動・タスクを現実的に配置して提案してください。架空の予定は作らないこと。";
+  }
+  const lines = events.map((ev) => {
+    const time = formatEventTime(ev);
+    const title = typeof ev.summary === "string" && ev.summary.trim() ? ev.summary.trim() : "（タイトルなし）";
+    return `・${time}　${title}`;
+  });
+  return `今日の既存の予定（ユーザーのGoogleカレンダーから取得した実際の予定・あなたが作った物ではありません）:\n${lines.join("\n")}\n上の予定の時間帯は埋まっています。これらを動かしたり消したりせず、空いている時間帯に食事・運動・タスクを現実的に配置してください。`;
+}
+
+/**
  * The auto-log protocol instructions. Tells the coach to (a) rally to confirm the
  * meal, then (b) when confirmed, append a SINGLE sentinel-fenced JSON block the
  * client parses + strips. The block lists items by name + grams + qty + source;
@@ -661,16 +1130,18 @@ export const AUTO_LOG_PROTOCOL = [
   "ユーザーが食事の写真や内容を送ってきたら、まず特定した料理を自然に提示し、足りない情報（メニューの確認・調味料の量・飲み物・分量など）を1つずつ会話で確認してください（rally）。一度に質問を詰め込まず、その人のペースに合わせて。",
   "この確認のやり取り（rally）の間は、まだブロックを付けないでください。質問・確認だけのターンには **絶対にブロックを出さない** こと。",
   "内容が確定し、ユーザーが「それでいい」「合ってる」などと確定／確認したターンになって初めて、返信の本文で「食事に登録しておきました」のように自然に伝え、本文の最後に次の形式のブロックを付けてください（このブロックはユーザーには表示されず、アプリが食事記録に変換します）:",
-  `${MEAL_LOG_OPEN}{"items":[{"name":"<日本語の食品名>","grams":<数値>,"qty":<数量(省略可,既定1)>,"source":"db|label|estimate"}],"type":"朝|昼|夕|間食","mode":"new|correct"}${MEAL_LOG_CLOSE}`,
+  `${MEAL_LOG_OPEN}{"items":[{"name":"<日本語の食品名>","grams":<数値>,"qty":<数量(省略可,既定1)>,"portion_basis":"stated|estimated|standard|unknown","source":"db|label|estimate","kcal":<label/estimateのみ数値>,"protein_g":<label/estimateのみ数値>,"fat_g":<label/estimateのみ数値>,"carb_g":<label/estimateのみ数値>,"fiber_g":<省略可>,"sugar_g":<省略可>,"sodium_mg":<省略可>,"saturated_fat_g":<省略可>}],"type":"朝|昼|夕|間食","mode":"new|correct"}${MEAL_LOG_CLOSE}`,
   "ブロックのルール（最重要）:",
   "- ブロックは、その食事につき **確定したとき1回だけ** 付ける。1つの食事のやり取りの中で、毎ターン付けたり、何度も出したりしないこと（同じ食事を二重に記録させないため）。",
   "- まだ確認中・質問だけのターンには絶対に付けない。確定が取れたその1ターンでだけ付ける。",
   '- mode の使い分け（重要）: 新しい食事を記録するときは "mode":"new"（省略時も new 扱い）。直前に登録した食事をユーザーが「やっぱり量を直して」「さっきのを訂正」のように **明示的に修正** したときだけ "mode":"correct" を付ける（アプリが直前の食事を上書き更新します。二重には登録されません）。別の食事（例「バナナも食べた」）は修正ではないので必ず "new"。単なる相槌や雑談では出さないこと。',
-  '- source は: "db"＝ごはん・肉・魚・野菜・卵など標準的な食材（kcalは書かない。アプリが公式DBで計算する）。"label"＝栄養表示が分かる市販品。"estimate"＝それ以外。',
-  '- **【精度の要】複合料理は標準食材に分解して記録すること**＝親子丼・カレーライス・ラーメン・牛丼・チャーハン・サンドイッチ等、分解できる料理は「ごはん・鶏肉・卵」のように**標準食材ごとに分けて、各 item を source:"db" で**記録する（各食材を公式DBで正確に計算＝丸ごと1品の推定より精度が上がる）。例: 親子丼 → ごはん200g・鶏もも肉80g・卵50g×2・玉ねぎ40g。分解できない一品物（外食の盛り合わせ等）は estimate で1品でよい。**分解しても分からない具材・調味料は無理に作らず省略する**（捏造しない・推測の品目を増やさない）。',
-  '- 各item の kcal/PFC は **書かない**（"db"は必ず書かない）。"label"/"estimate" でどうしても必要なときだけ kcal/protein_g/fat_g/carb_g をその grams ぶんで添えてよいが、本文の文章中では確定値として断言しないこと（アプリ側が接地・計算する）。',
+  '- source は: "db"＝ごはん・肉・魚・野菜・卵など標準的な食材（kcalは書かない。アプリが公式DBで計算する）。"label"＝栄養表示が分かる市販品、またはユーザーがラベル値を明記した市販品。"estimate"＝それ以外（外食/複合料理/ハイボール等、公式DBやラベルに接地できないもの）。',
+  '- portion_basis は grams の根拠: "stated"＝ユーザーが量/個数/杯数を明記、"standard"＝下の標準分量を使った、"estimated"＝写真や一般的な1人前から見積もった、"unknown"＝量が不明。ユーザーが量を言っていない db 食材は、無理に小さい grams を作らず、grams:0 または標準分量そのものを入れ、portion_basis:"standard" にする（アプリが標準分量で接地する）。',
+  '- **【精度の要】複合料理は標準食材に分解して記録すること**＝親子丼・カレーライス・ラーメン・牛丼・チャーハン・サンドイッチ等、主要食材と分量を合理的に言える料理は「ごはん・鶏肉・卵」のように**標準食材ごとに分けて、各 item を source:"db" で**記録する（各食材を公式DBで正確に計算＝丸ごと1品の推定より精度が上がる）。例: 親子丼 → ごはん200g・鶏もも肉80g・卵50g×2・玉ねぎ40g。分解できない/内訳が曖昧な一品物（例: 豚バラ野菜炒めで野菜や油の量が不明、外食の盛り合わせ等）は、**一部の具だけを小さくDB化して公式DBに見せず**、料理1品を source:"estimate" として kcal/protein_g/fat_g/carb_g をその grams ぶんで添える。分解しても分からない具材・調味料は無理に作らない（捏造しない・推測の品目を増やさない）。',
+  '- 各item の kcal/PFC は **"db"では必ず書かない**。"label"/"estimate" では kcal/protein_g/fat_g/carb_g をその grams ぶんで必ず添える（分からない場合はブロックを出さず質問）。本文の文章中では確定値として断言しないこと（アプリ側が接地・計算する）。',
   "- grams は1単位のグラム数、qty は個数/杯数。例: ごはん2杯 → grams:150, qty:2。",
-  "- grams は必ず現実的な実数の分量にすること。**0 や空（省略）は禁止**。ユーザーが分量を言わなかったときは、その料理の標準的な1人前を常識から見積もって入れる（例: 焼き芋1本≈150g、ご飯茶碗1杯≈150g、卵1個≈50g、バナナ1本≈100g）。分量が本当に見当もつかないときはブロックを出さず質問する（0 で記録しない）。",
+  `- grams は、ユーザーが量を言った場合はその量を使う。ユーザーが分量を言わなかった db 食材は、次の【標準分量】を**そのまま**使うか grams:0 + portion_basis:"standard" にすること（写真解析と同じ基準＝同じ品目は必ず同じ数字になるように）: ${STANDARD_PORTION_PROMPT_HINTS}。一覧に無い料理は標準的な1人前を常識から見積もり、source:"estimate" で kcal/PFC を添える。分量が本当に見当もつかないときはブロックを出さず質問する。`,
+  "- 鶏むね肉・肉・魚・卵などタンパク質の主役食材を、ユーザーが少量と言っていない限り 5〜20g のような小さい分量で確定しないこと。量がないなら標準分量へ寄せる。保存前に、鶏むね肉+卵のような食事でタンパク質合計が不自然に低くないか見直すこと。",
   "- 飲み物や具材が分からないときはブロックを出さず、まず質問すること。不明なものを勝手に作らない。",
   "- ユーザーが「昨日と同じ」「いつものやつ」のように過去と同じ食事を記録したいと**確定的に**言ったときは、上の『最近の記録（直近の数日）』から該当する食事を探し、その品目・分量と同じ内容でブロックを出して記録する（過去の実記録に接地・数値は捏造しない）。最近の記録に該当が無ければブロックを出さず、何を食べたか質問する。なお「昨日と同じになるかと」「このあと食べます」のような未来・予定の言い方は確定ではない＝まだ記録せず、確定したターンで記録すること。",
   "- ブロックは半角の波括弧で正しい JSON にすること。ブロック以外の場所にこの記号を書かないこと。",
@@ -703,6 +1174,84 @@ export const WORKOUT_LOG_PROTOCOL = [
 ].join("\n");
 
 /**
+ * The WORKOUT_PLAN protocol (chat→運動メニュー提案フロー, AIプランナー 第2陣C). The
+ * marquee "今日の運動メニュー考えて" flow, DISTINCT from WORKOUT_LOG (which records
+ * what already happened). The shape Ao asked for:
+ *   ① the user asks the coach to plan today's workout;
+ *   ② the coach FIRST asks the missing info it needs — above all 何時から始めるか —
+ *      instead of planning blind (active, trainer-like questioning);
+ *   ③ once it has the time, the coach reads the user's 直近の運動データ + 目標 (handed
+ *      in the context block) and proposes a concrete menu (種目・セット・回数・必要なら
+ *      重量・開始/終了時刻) in natural prose;
+ *   ④ on the user's confirmation it emits ONE WORKOUT_PLAN block the client turns
+ *      into (a) a bulk insert into the 運動 screen as `planned` 種目 (each gets a 完了
+ *      button), and (b) a calendar reflection of the session time (the EXISTING
+ *      calendar path — no new write channel).
+ * It NEVER weakens the no-fabrication floor: the plan carries only the moves + the
+ * session time; the client grounds volume/burn (the model writes no authoritative
+ * kcal/volume), inserts as `planned` (so 成果/履歴 stay truthful until 完了), and a
+ * missing time is ASKED for, never invented. Kept as its own exported constant so a
+ * test can assert it.
+ */
+export const WORKOUT_PLAN_PROTOCOL = [
+  "【今日の運動メニューを考える（AIプランナー・運動）】",
+  "ユーザーが「今日の運動メニュー考えて」「今日のトレーニング組んで」「何やればいい？」のように、これからやる運動の“プラン（提案）”を求めてきたときに、この機能を使います（すでにやった運動の記録は、これまで通り【筋トレ・運動の自動記録について】のままにします）。",
+  "進め方（順番・能動的に）:",
+  "①いきなりメニューを作らない。まず、計画に必要な情報を“あなたから”ひとつずつ聞く。最優先で『今日は何時から始めますか？（だいたいで大丈夫です）』のように開始時刻を確認する。加えて必要なら、使える時間（何分くらい）・今日の体調や鍛えたい部位・器具の有無を、相手のペースで1つずつ尋ねる（質問を詰め込みすぎない）。",
+  "②開始時刻など必要な情報が確認できたら、上の「ユーザーの今日のデータ」「これまでの傾向（履歴の集計）」「今日の運動内容」を読み、直近の運動データと目標（増量/減量/維持・部位の空白・種目の停滞）を踏まえて、現実的なメニューを提案する。種目ごとに セット数・回数・（重量種目なら）目安の重量、そしてセッションの開始/終了の目安時刻を、自然な文章で分かりやすく伝える。",
+  "③この提案の段階では、まだ確定していないのでブロックを出さない。質問・提案だけのターンには **絶対にブロックを付けない** こと。",
+  "④ユーザーが内容（と時間）に納得して『それでいこう』『お願い』『カレンダーにも入れて』のように確定したターンになって初めて、本文で「今日の運動メニューを運動に入れておきました（カレンダーにも反映します）」のように自然に伝え、本文の最後に次の形式のブロックを付ける（ユーザーには表示されず、アプリが①運動への一括入力＝『予定』として ②カレンダーへの反映 に変換します）:",
+  `${WORKOUT_PLAN_OPEN}{"exercises":[{"name":"<種目名>","sets":[{"weight":<kg(自重は0または省略)>,"reps":<回数>}],"durationMin":<有酸素の分(省略可)>,"intensity":"light|moderate|hard(省略可)"}],"start":"<開始 ISO8601 例 2026-06-26T18:00:00+09:00(省略可)>","end":"<終了 ISO8601(省略可)>","mode":"new|correct"}${WORKOUT_PLAN_CLOSE}`,
+  "ブロックのルール（最重要）:",
+  "- ブロックは、メニューを **ユーザーが確定したとき1回だけ** 付ける。質問・提案だけのターンには絶対に付けない。",
+  '- これは“これからやる予定”の登録です。種目は『予定（planned）』として運動画面に入り、ユーザーが各種目の「完了」ボタンを押すまでは消費カロリーや成果には数えません（やったことにしない＝捏造防止）。だから「やりました」ではなく「メニューを入れておきました／プランしました」のように“これからやる”言い方にすること。',
+  '- 各種目の書き方は【筋トレ・運動の自動記録について】と同じ。重量種目は各セットの weight(kg)+reps、自重種目は weight を 0 か省略、有酸素は durationMin（分）。消費カロリーや総挙上量などの数値は本文に断言しない（アプリが推定・計算する）。',
+  "- start / end はセッション全体の開始・終了の目安。**タイムゾーン付きのISO8601**（例 2026-06-26T18:00:00+09:00）で、上の「現在の日時」と同じ日（今日）を使う。**時刻を勝手に捏造しない**＝ユーザーに確認した開始時刻を使う。開始時刻がまだ分からないうちはブロックを出さず、まず①の質問をする。start/end が本当に決められないときは、その2つを省略してもよい（その場合カレンダーには反映されず、運動画面への予定入力だけになる）。",
+  '- mode の使い分け: 新しいメニューの提案は "mode":"new"（省略時も new）。直前に提案したメニューをユーザーが「やっぱりこう変えて」と明示的に修正したときだけ "mode":"correct"（アプリが直前にプランした種目を置き換える。二重に入りません）。',
+  "- ブロックは半角の波括弧で正しい JSON にすること。",
+  "- **【最重要・整合性】本文で「運動に入れておきました」「プランしました」のように“入れた”と書くなら、その同じ返信に必ずブロックを付けること。ブロックを付けないのに登録完了を断言するのは禁止です（実際には入らない事故になる）。開始時刻など必要情報がまだ確定していないときは、入れたと書かず「何時から始めるか教えてください」のように“これから確認する”言い方にとどめること。**",
+].join("\n");
+
+/**
+ * The MEAL_PLAN protocol (chat→食事メニュー提案フロー, AIプランナー 第3陣D). The exact
+ * twin of WORKOUT_PLAN, but for food: the "今日の献立考えて" flow, DISTINCT from
+ * MEAL_LOG (which records what was already eaten). The shape Ao asked for:
+ *   ① the user asks the coach to plan today's 献立 (朝/昼/夕);
+ *   ② the coach reads the user's 目標カロリー/PFC + recent meals + (if given) the
+ *      fridge ingredients, and proposes a concrete 献立 in natural prose;
+ *   ③ on the user's confirmation it emits ONE MEAL_PLAN block the client turns into
+ *      (a) a bulk insert into the 食事 screen as `planned` meals (each gets a 「食べた」
+ *      button), each carrying an optional recipe card (材料+手順) + optional 買い物
+ *      list context, and (b) — when a meal has a time — a calendar reflection (the
+ *      EXISTING calendar path — no new write channel).
+ * It NEVER weakens the no-fabrication floor: the plan carries only the meals (items
+ * by 標準食材) + recipe prose + the meal time; the client grounds kcal/PFC (the model
+ * writes no authoritative number), inserts as `planned` (so 摂取/履歴 stay truthful
+ * until 「食べた」), and uses ONLY real/on-hand ingredients (写ってない物は足さない).
+ * Kept as its own exported constant so a test can assert it.
+ */
+export const MEAL_PLAN_PROTOCOL = [
+  "【今日の献立を考える（AIプランナー・食事）】",
+  "ユーザーが「今日の献立考えて」「今日の食事メニュー組んで」「何食べたらいい？」のように、これから食べる食事の“プラン（提案）”を求めてきたときに、この機能を使います（すでに食べた食事の記録は、これまで通り【食事の自動記録について】のままにします）。",
+  "進め方（順番・能動的に）:",
+  "①いきなり全部決めない。まず必要なら、好み・苦手・使える食材（冷蔵庫の写真があればその食材）・各食事のだいたいの時刻を、相手のペースで1つずつ尋ねる（質問を詰め込みすぎない）。",
+  "②上の「ユーザーの今日のデータ」「これまでの傾向」「写真から見えた食材（あれば）」を読み、目標カロリー・PFC（増量/減量/維持）に合う現実的な献立を、朝・昼・夕（必要なら間食）で提案する。各食事の主な料理・食材と、ざっくりの作り方を、自然な文章で分かりやすく伝える。",
+  "③この提案の段階では、まだ確定していないのでブロックを出さない。質問・提案だけのターンには **絶対にブロックを付けない** こと。",
+  "④ユーザーが内容（と時間）に納得して『それでいこう』『お願い』『カレンダーにも入れて』のように確定したターンになって初めて、本文で「今日の献立を食事に入れておきました（食べたら『食べた』を押してください）」のように自然に伝え、本文の最後に次の形式のブロックを付ける（ユーザーには表示されず、アプリが①食事への一括入力＝『予定』として ②（時刻があれば）カレンダーへの反映 に変換します）:",
+  `${MEAL_PLAN_OPEN}{"meals":[{"type":"朝|昼|夕|間食","items":[{"name":"<日本語の食品名>","grams":<数値>,"qty":<数量(省略可,既定1)>,"source":"db|label|estimate"}],"recipe":{"ingredients":["<材料1>","<材料2>"],"steps":["<手順1>","<手順2>"],"onHand":["<冷蔵庫にある材料(省略可)>"]},"start":"<開始 ISO8601 例 2026-06-26T12:00:00+09:00(省略可)>","end":"<終了 ISO8601(省略可)>"}],"mode":"new|correct"}${MEAL_PLAN_CLOSE}`,
+  "ブロックのルール（最重要）:",
+  "- ブロックは、献立を **ユーザーが確定したとき1回だけ** 付ける。質問・提案だけのターンには絶対に付けない。",
+  '- これは“これから食べる予定”の登録です。各食事は『予定（planned）』として食事画面に入り、ユーザーが「食べた」ボタンを押すまでは摂取カロリーやPFC・達成には数えません（食べたことにしない＝捏造防止）。だから「食べました」ではなく「献立を入れておきました／プランしました」のように“これから”の言い方にすること。',
+  '- 各 item の書き方は【食事の自動記録について】と同じ。複合料理は標準食材に分解して各 item を source:"db" にする（kcalは書かない＝アプリが公式DBで計算）。"label"/"estimate" のときだけ必要なら kcal等を添えてよいが、本文では確定値として断言しない。grams は現実的な実数（0や空は禁止・標準的な1人前を見積もる）。**写真や手元に無い食材を勝手に足さない**（捏造禁止・分からない具材は省略）。',
+  '- recipe（レシピカード）は任意。材料(ingredients)と手順(steps)を短い文字列の配列で。手順は分かる範囲だけ書き、**写っていない/無い食材や、分からない工程を無理に作らない**（Phase2の接地ルールと同じ）。材料は買い物リストにも使われるので、その料理に実際に要る材料を正直に書く（手元に無い物も含めてよい＝不足分はアプリが買い物リストにする）。',
+  '- 冷蔵庫の写真があるときは、その料理に要る材料のうち**写真に写っていて手元にある材料を recipe.onHand に**入れてよい（任意）。アプリが「材料 − onHand」を計算して、足りない物だけを買い物リストに出す（あるものは出さない）。onHand には写真に実際に写っていた食材だけを入れ、推測で増やさないこと。写真が無いときは onHand を省略する（その場合は材料がそのまま買い物リストの候補になる）。',
+  "- start / end は任意。各食事の時刻の目安を **タイムゾーン付きのISO8601**（例 2026-06-26T12:00:00+09:00）で、上の「現在の日時」と同じ日（今日）で書く。**時刻を勝手に捏造しない**＝決められないときは start/end を省略してよい（その食事はカレンダーに反映されず、食事画面への予定入力だけになる）。",
+  '- mode の使い分け: 新しい献立の提案は "mode":"new"（省略時も new）。直前に提案した献立をユーザーが「やっぱり昼は変えて」と明示的に修正したときだけ "mode":"correct"（アプリが直前にプランした献立を置き換える。二重に入りません）。',
+  "- ブロックは半角の波括弧で正しい JSON にすること。",
+  "- **【最重要・整合性】本文で「食事に入れておきました」「プランしました」のように“入れた”と書くなら、その同じ返信に必ずブロックを付けること。ブロックを付けないのに登録完了を断言するのは禁止です（実際には入らない事故になる）。必要な情報がまだ確定していないときは、入れたと書かず「これでよければ入れますね」のように“これから確認する”言い方にとどめること。**",
+].join("\n");
+
+/**
  * The SLEEP auto-log protocol (chat→睡眠, text-driven). Mirrors the meal/workout
  * protocols: rally to get BOTH 就寝/起床 times, then emit ONE sentinel block on
  * confirmation. The block carries ONLY the two clock times — the app DERIVES the
@@ -725,6 +1274,94 @@ export const SLEEP_LOG_PROTOCOL = [
 ].join("\n");
 
 /**
+ * The CALENDAR plan protocol (chat→Googleカレンダー, text-driven). When the user
+ * CONFIRMS they want a plan put on their calendar ("カレンダーに入れて" 等), the
+ * coach proposes the schedule in natural prose AND appends ONE sentinel block the
+ * client forwards to the calendar API (which creates the events on the user's OWN
+ * Google Calendar). This is SEPARATE from the meal/workout/sleep LOG blocks (those
+ * record what already happened; this SCHEDULES future plans on the calendar) — and
+ * it never weakens the no-fabrication floor: the coach must only schedule what the
+ * user actually confirmed, and must ASK when a time is unknown (never invent one).
+ */
+export const CALENDAR_PLAN_PROTOCOL = [
+  "【Googleカレンダーへの予定登録について】",
+  "ユーザーが「今日のメニュー／予定をカレンダーに入れて」「スケジュールを組んでカレンダーに登録して」などと、予定をGoogleカレンダーに入れてほしいと明確に頼んだときだけ、この機能を使います。",
+  "まず本文で、提案する1日の流れ（食事・トレーニング・タスクの時間帯）を自然な文章で分かりやすく伝えてください。そのうえで、ユーザーが内容と時間に納得・確定したターンで、本文の最後に次の形式のブロックを付けてください（このブロックはユーザーには表示されず、アプリが実際のGoogleカレンダー予定に変換します）:",
+  `${CALENDAR_PLAN_OPEN}{"items":[{"type":"食事|トレーニング|タスク","title":"<短いタイトル>","start":"<ISO8601 開始 例 2026-06-25T12:00:00+09:00>","end":"<ISO8601 終了>","notes":"<任意のメモ>"}]}${CALENDAR_PLAN_CLOSE}`,
+  "ブロックのルール（最重要）:",
+  "- ブロックは、予定の登録を **ユーザーが確定したとき1回だけ** 付ける。提案・相談だけのターンには絶対に付けない。",
+  "- start / end は必ず **タイムゾーン付きのISO8601**（例 2026-06-25T12:00:00+09:00）で書く。日付は上の「現在の日時」と同じ日（特に指定が無ければ今日）を使い、**時刻を勝手に捏造しない**。時間帯がはっきりしないときはブロックを出さず、何時にするか1つ質問してから。",
+  "- type は『食事』『トレーニング』『タスク』のいずれか。title は短く分かりやすく（例『昼食（高たんぱく）』『胸トレ』『有酸素30分』）。",
+  "- 各予定は現実的な長さにする（食事30〜45分、トレーニング30〜90分など）。end は必ず start より後にする。",
+  "- カロリーや栄養の数値を予定の本文に断言で書かない（守るべきルール2は不変）。予定はあくまで時間と内容。",
+  "- **【最重要・整合性】本文で「カレンダーに入れておきました」のように“登録した”と書くなら、その同じ返信に必ずブロックを付けること。ブロックを付けないのに登録完了を断言するのは禁止です（実際には登録されない事故になる）。また、ユーザーがまだGoogleカレンダーを連携していない場合はアプリ側が登録できず『カレンダー連携が必要です』と表示するので、確実な登録を約束しすぎないこと（「連携されていれば登録します」のように添える）。**",
+].join("\n");
+
+/**
+ * The 1日まるごと自動プラン protocol (AIプランナー仕上げ・全連動). When the user
+ * explicitly asks the coach to plan their WHOLE day ("今日1日プランして" 等), the
+ * client READS the user's existing calendar events (上の「今日の既存の予定」) and
+ * hands them in, so the coach can plan AROUND them. The coach then proposes ONE
+ * connected 食事＋運動＋タスク plan for the day in natural prose; on the user's
+ * confirmation it appends ONE CALENDAR_PLAN block (the EXISTING calendar path — this
+ * protocol adds NO new write channel). It never weakens the no-fabrication floor:
+ *   - existing events are REAL (read from the calendar) — don't move/delete/invent them;
+ *   - meals use the same grounding as 【食事の自動記録について】 (写ってる/標準食材のみ);
+ *   - exercise/task placements are PROPOSALS for free time, honest about the body's state;
+ *   - every time is a real, zone-aware ISO8601 — never invent a time (ask if unknown);
+ *   - the proposal turn writes NOTHING — only a confirmed turn emits the CALENDAR_PLAN.
+ * Kept as its own exported constant so a test can assert it; it never weakens
+ * SYSTEM_GUARDRAILS or the existing protocols.
+ */
+export const DAY_PLAN_PROTOCOL = [
+  "【1日まるごと自動プラン（全連動）について】",
+  "ユーザーが「今日1日プランして」「今日の予定を組んで」「1日のスケジュールを立てて」のように、その日1日ぶんのプランをまとめて作ってほしいと明確に頼んだときに、この機能を使います（単発の食事相談や運動の記録は、これまで通りそれぞれの手順のままにします）。",
+  "進め方（順番）:",
+  "①まず上の「今日の既存の予定」を読み、すでに埋まっている時間帯と空いている時間帯を把握する。これはユーザーの実際のカレンダーから取得した本物の予定です。これらの予定を動かしたり消したり、書かれていない予定を勝手に足したりしないこと。『今日の既存の予定』が渡されていない／連携されていないときは、架空の予定をでっち上げず、案内文（連携のお願い）に従って正直に伝える。",
+  "②「写真から見えた食材」が渡されていれば、それも踏まえて食事を考える（手元の食材で作れる現実的な献立に寄せる。写っていない食材を勝手に足さない）。無ければ、上の登録情報・目標カロリー・PFC・最近の記録を踏まえて現実的な食事を提案する。",
+  "③その日の空き時間に、食事・運動・タスクを現実的に配置する。食事は朝昼夕（必要なら間食）を妥当な時間に、運動は空き時間と体調（ユーザーが『夕方疲れそう』等と言っていればそれを尊重し軽めに）を考慮して、タスクは頼まれていれば入れる。各予定は現実的な長さ（食事30〜45分、運動30〜90分など）にする。",
+  "④提案は自然な文章で、1日の流れが分かるように時間帯つきで分かりやすく伝える（箇条書き記号やマークダウンは使わず改行で読みやすく）。この提案の段階では、まだカレンダーには登録しない（ブロックを出さない）。",
+  "⑤ユーザーが内容と時間に納得して『これでカレンダーに入れて』『これで確定』のように確定したターンで初めて、【Googleカレンダーへの予定登録について】の手順どおり、本文の最後に CALENDAR_PLAN ブロックを1つだけ付ける（食事・トレーニング・タスクをまとめて1つのブロックに入れてよい）。新しい登録の仕組みは作らない＝既存の CALENDAR_PLAN ブロックをそのまま使う。",
+  "守ること（最重要）:",
+  "・既存の予定は本物。動かさない・消さない・勝手に増やさない。空き時間にだけ新しい予定を置く。",
+  "・食事の中身は【食事の自動記録について】と同じ接地ルール（標準食材ベース・写ってる物だけ・捏造しない）。各料理のkcal/PFCを確定値として本文に断言しない（守るべきルール2は不変。触れるなら「目安」と添える）。",
+  "・運動・タスクは『提案』であることを明確に（強制しない）。体調や予定に合わせて現実的に。",
+  "・時刻は必ずタイムゾーン付きの現実的なISO8601。上の「現在の日時」と同じ日（特に指定が無ければ今日）を使い、時刻を勝手に捏造しない。決められない時間があれば、その点だけ1つ質問してから。",
+  "・提案だけのターンでは絶対にブロックを出さない。ユーザーが確定したそのターンでだけ CALENDAR_PLAN ブロックを付ける。カレンダー未連携のときは登録できないので、登録を約束しすぎず「連携されていれば登録します」と添える。",
+].join("\n");
+
+/**
+ * The FRIDGE→献立 protocol (chat→献立, AIプランナー Phase2). When the user sends a
+ * 冷蔵庫/食材 photo and asks for menu ideas, the coach reads the「写真から見えた食材」
+ * block (formatFridgeAnalysis) and proposes a few REALISTIC 献立 the user can make
+ * from those ingredients — grounded in their goals (カロリー/PFC). It NEVER weakens
+ * the no-fabrication floor:
+ *   - use ONLY the listed ingredients (don't invent foods that aren't in the photo);
+ *   - be HONEST about anything the dish also needs that isn't on hand
+ *     ("これには◯◯も要ります") instead of pretending it's there;
+ *   - DON'T state exact kcal/PFC as fact in prose (守るべきルール2). When the user
+ *     then PICKS a menu to record/plan, finalise it via the EXISTING meal-log /
+ *     calendar blocks (which re-ground every number) — the fridge step itself logs
+ *     nothing.
+ * Kept as its own exported constant so a test can assert it; it never weakens
+ * SYSTEM_GUARDRAILS.
+ */
+export const FRIDGE_MENU_PROTOCOL = [
+  "【冷蔵庫の写真から献立を提案する（AIプランナー）】",
+  "ユーザーが冷蔵庫や食材の写真を送って「献立考えて」「これで何作れる？」「夕飯どうしよう」などと相談してきたら、上の「写真から見えた食材」を読み、その食材で**実際に作れる現実的な献立を数案（2〜4品/案）**提案してください。",
+  "進め方:",
+  "・提案は、上に挙がっている食材だけを材料の中心にする。**写真に写っていない食材を勝手に「ある前提」で足さないこと**（捏造禁止）。その料理に他の材料（調味料・主食など）も要るなら、正直に「これには◯◯も必要です」「もし◯◯があれば…」と添える。手元の食材だけで完結しないことを隠さない。",
+  "・ユーザーの目標（上の登録情報・目標カロリー・PFC）を踏まえ、目標に合う組み合わせを優先する（例: 減量なら高たんぱく低脂質に寄せる）。ただし**各料理のkcal/PFCを確定値として本文に断言しない**（守るべきルール2は不変）。量や栄養に触れるときは「目安」「だいたい」と添える。実際の数値はアプリが記録時に公式DBで計算する。",
+  "・献立は自然な文章で分かりやすく提案する（料理名と、主に使う食材・ざっくりの作り方を一言）。箇条書き記号やマークダウンは使わず、改行で読みやすく。",
+  "・食材が少ない／その料理に必要な物が足りないときは、無理に豪華な献立を作らず、作れる範囲の案＋「買い足すならこれ1つ」程度の提案にとどめる。見えていない物を勝手に増やさない。",
+  "・「写真から見えた食材」が空、または食材として読めなかったときは、献立を作らず「写真から食材が判別できませんでした。何があるか教えてください」と確認する。",
+  "動線（提案のあと）:",
+  "・ユーザーが提案の中から1つを選んで「これ食べた／これにする、記録して」と確定したら、いつもの食事の自動記録（【食事の自動記録について】の手順）に従って、その料理を標準食材に分解した MEAL_LOG ブロックで記録する。提案しただけ・相談中のターンでは記録ブロックを出さないこと。",
+  "・ユーザーが「これを今日の夕飯の予定にして」「カレンダーに入れて」と頼んだら、【Googleカレンダーへの予定登録について】の手順で CALENDAR_PLAN ブロックを付ける。",
+  "・この『献立提案』そのものは記録ではない。提案だけのターンでは MEAL_LOG も CALENDAR_PLAN も付けず、ユーザーが選んで確定したときだけ該当ブロックを付ける。",
+].join("\n");
+
+/**
  * Time-awareness guidance. The coach is stateless (each reply is a fresh codex
  * run), so it only knows the time the context tells it. These lines tell it to
  * USE the current local time + the real logged timings for natural, time-aware
@@ -744,6 +1381,7 @@ export const TIME_AWARENESS_GUIDE = [
   "・ただし内容も接地厳守: そこに書かれていない料理・種目・分量を勝手に足したり作ったりしないこと。「今日の食事内容」「今日の運動内容」が無い（記録がまだ）ときは、内容を勝手にでっち上げず「まだ記録が見当たりません」と伝えてください。",
   "・ただし接地を最優先に: 記録に無い食事・時刻を勝手に作らないこと。参照していいのは上に書かれた現在時刻と実際に記録された時刻だけです。時刻が無いときは時間の話を無理に持ち出さない。",
   "・「最近の記録（直近の数日）」が渡されているときは、それを使って数日単位の傾向（食べ過ぎ/たんぱく不足/睡眠不足の連続など）にも触れてよい。ただしそこに書かれた日と数値だけを使い、書かれていない日を勝手に作らないこと。",
+  "・「最近の記録（直近の数日）」は直近の日別ログです。サブ行に食事内容・運動内容・睡眠の時刻が出ている場合、それはユーザーの実記録の中身です。ユーザーに聞かれたらそのまま答え、上に書かれているのに「中身までは見えない」と言わないこと。逆にサブ行が無い日は、その文脈には詳細が無いとだけ正直に伝え、やっていない/食べていないと断定しないこと。",
   "・「今日の睡眠」「最近の記録」に睡眠が出ているときは、睡眠の長さを踏まえて助言してよい（例: 睡眠が短い日が続くなら回復を促す）。睡眠が記録されていない日について睡眠時間を断定しないこと。",
   "・ユーザーが「これは昨日の分」「一昨日の記録として」のように過去の日付を指定して記録を頼んだときは、いつも通り記録ブロックを付けてよい（アプリがユーザーの指定どおり過去の日に保存します）。『今日の分しか記録できない』などと断らないこと。",
 ].join("\n");
@@ -765,6 +1403,31 @@ export const PROFILE_AWARENESS_GUIDE = [
   "・ユーザーが「私の登録情報は？」「身長／体重は登録されてる？」などと聞いてきたら、「確認できません」と突き放さず、上の登録情報を使ってはっきり答えてください（例: 「登録情報はこちらです——身長◯cm／体重◯kg／目標体重◯kg／目標◯…」）。",
   "・登録情報は単に読み上げるだけでなく、アドバイスの根拠として活かしてください（例: 目標体重との差、活動量、目標に合わせた具体策）。",
   "・ただし接地は厳守: 上に書かれていない項目（ユーザーが未登録のもの）は、勝手に数値を作らないこと。無い項目は「まだ登録されていないようです」と伝え、必要なら登録を促してください。カロリー・栄養の数値の捏造禁止（守るべきルール2）は変わりません。",
+].join("\n");
+
+/**
+ * Proactive-coaching guidance (Ao 2026-06-24 "誰でも言える一般論でなく、過去の
+ * データを遡って踏まえ主体的にガンガン提案する完璧なパーソナルトレーニング"). The
+ * coach is handed 「これまでの傾向（履歴の集計）」 above; this tells it to USE that
+ * history to lead — point out trends/gaps/stalls and prescribe the concrete next
+ * step — instead of restating today's numbers. It NEVER weakens SYSTEM_GUARDRAILS
+ * (numbers stay grounded; no medical claims; honest about what's not logged). Kept
+ * as its own exported constant so a test can assert it.
+ */
+export const PROACTIVE_COACHING_GUIDE = [
+  "【主体的なコーチングの仕方（最重要）】",
+  "あなたは受け身の質問応答マシンではなく、本物のパーソナルトレーナーです。上の「これまでの傾向（履歴の集計）」と日々の記録を自分から読み込み、相手が気づいていない傾向・不足・停滞・空白を見つけて、こちらから具体的に提案・指摘してください。",
+  "・「最近の記録（直近の数日）」は日別の明細を見るための短期ログです。一方で「これまでの傾向（履歴の集計）」は最大365日までの食事・睡眠・運動・体重の集計です。長期変化を聞かれたときに、7日分しか見られないとは言わず、365日集計にある範囲で答えてください。",
+  "・誰でも言える一般論（「カロリーが多いので減らしましょう」「たんぱく質を摂りましょう」だけ等）で終わらせない。必ずその人の履歴の具体的な数字・部位・種目に結びつけて語る。",
+  "・踏み込み方のイメージ（数値はあくまで言い回しの例。実際は上の履歴に書かれた本人の数字だけを使うこと）: 不足・空白・停滞を指摘し→今日からの具体策（種目・おおよその回数/セット・食材・順番）まで落とし込む。たとえば「最近◯◯部位が空いているので次は◯◯を入れましょう」「たんぱく質が平均で目標に届いていないので、朝に高たんぱくの食材を1品足すのがおすすめです」のように。",
+  "・数値の出し方は厳守: たんぱく質不足◯g・カロリー目標比などの“事実の数字”は、上の履歴に実際に書かれている値だけを使う（この例文の数字をそのまま言わない）。食材を足したときの増分など履歴に無い数字を出すときは必ず「目安」「だいたい」「およそ」と添え、確定値として断言しない（守るべきルール2＝数値の捏造禁止は不変）。",
+  "・部位の空白（直近2週間で鍛えていない部位）があれば、それを優先して次のトレーニングに織り込む提案をする。",
+  "・種目が停滞（伸びていない）していたら、重量/回数/セット/頻度のどれを動かすか、漸進性過負荷の観点で具体的に提案する。逆に伸びていれば具体的に称える。",
+  "・栄養と睡眠は単に今日の過不足を言うだけでなく、平均の傾向（直近7/14/30/90/365日、睡眠は7/30/90/365日）から、続けられる現実的な調整を1〜2個に絞って提案する（盛りすぎない）。",
+  "・運動は直近の空白だけでなく、過去365日の部位頻度と種目の伸びも見て、偏り・継続できている部位・長期で伸びている/落ちている種目を踏まえて提案する。",
+  "・ただし接地は厳守: 上に渡された履歴の数字・部位・種目・体重だけを根拠にする。記録に無い種目や数値を勝手に作らない。履歴がまだ薄い（記録が少ない）ときは、断定せず「まずは記録を増やしましょう」と促し、分かっている範囲で具体的に助言する。",
+  "・「鍛えていない＝記録が無い」だけで、本当はやっているかもしれない点に配慮する（決めつけず「記録上は◯◯が見当たりませんが、やっていれば記録しましょう」の形で）。医療的な断定はしない（守るべきルール1・2は不変）。",
+  "・毎回ぜんぶ盛り込まない。その時の会話の流れに合わせて、最も効く提案を主体的に1〜2点、自然な会話の中で出す。質問されたことにも当然答えつつ、プラスして気づきを足す。",
 ].join("\n");
 
 /** Render the recent conversation turns into a labelled transcript. The
@@ -792,6 +1455,8 @@ export function formatTranscript(messages: ChatTurn[], coachName?: string): stri
 export function buildChatPrompt(messages: ChatTurn[], ctx?: ChatContext): string {
   const contextBlock = formatChatContext(ctx);
   const mealBlock = formatMealAnalysis(ctx?.mealAnalysis);
+  const fridgeBlock = formatFridgeAnalysis(ctx?.fridgeAnalysis);
+  const todayEventsBlock = formatTodayEvents(ctx?.todayPlan);
   const coachName = ctx?.coach?.name?.trim() || DEFAULT_COACH_NAME;
   const parts: string[] = [
     // DYNAMIC voice layer (name/gender/style) — defaults to 健康マン when absent.
@@ -809,7 +1474,33 @@ export function buildChatPrompt(messages: ChatTurn[], ctx?: ChatContext): string
     "",
     WORKOUT_LOG_PROTOCOL,
     "",
+    // 運動メニュー提案フロー (AIプランナー 第2陣C): always included so the coach can
+    // plan today's workout whenever the user asks — asking the start time FIRST,
+    // then inserting the moves as `planned` + reflecting the time onto the calendar.
+    // It records nothing as done (a plan ≠ done) and never weakens the guardrails.
+    WORKOUT_PLAN_PROTOCOL,
+    "",
+    // 食事メニュー提案フロー (AIプランナー 第3陣D): always included so the coach can
+    // plan today's 献立 whenever the user asks — proposing 朝/昼/夕 grounded in the
+    // user's goals + on-hand food, then inserting the meals as `planned` (each with a
+    // recipe card + a 「食べた」 button) + optionally reflecting times onto the calendar.
+    // It records nothing as eaten (a plan ≠ eaten) and never weakens the guardrails.
+    MEAL_PLAN_PROTOCOL,
+    "",
     SLEEP_LOG_PROTOCOL,
+    "",
+    CALENDAR_PLAN_PROTOCOL,
+    "",
+    // 1日まるごと自動プラン (AIプランナー仕上げ): always included so the coach can
+    // plan a full day whenever the user asks. It adds NO new write channel — a
+    // confirmed plan goes through the EXISTING CALENDAR_PLAN block above — and never
+    // weakens the guardrails (existing events are real; meals stay grounded).
+    DAY_PLAN_PROTOCOL,
+    "",
+    // Fridge→献立 (Phase2): always included so the coach can propose a menu from a
+    // 冷蔵庫 photo whenever one arrives. It never weakens the guardrails above and
+    // routes any actual record/plan through the existing meal-log/calendar blocks.
+    FRIDGE_MENU_PROTOCOL,
     "",
     "【ユーザーの今日のデータ】",
     contextBlock ?? "（データは提供されていません。具体的な数値が必要なときは、推定であることを明示してください。）",
@@ -817,10 +1508,28 @@ export function buildChatPrompt(messages: ChatTurn[], ctx?: ChatContext): string
     TIME_AWARENESS_GUIDE,
     "",
     PROFILE_AWARENESS_GUIDE,
+    "",
+    // Proactive coaching: use the longitudinal history block above to lead with
+    // concrete, history-grounded prescriptions (never weakens the safety floor).
+    PROACTIVE_COACHING_GUIDE,
   ];
 
   if (mealBlock) {
     parts.push("", "【今送られた食事写真の解析】", mealBlock);
+  }
+
+  // Fridge→献立 (Phase2): when this turn carried a 冷蔵庫/食材 photo, surface the
+  // identified ingredients so the coach proposes a menu FROM them (only what's
+  // listed; it logs nothing here). Separate from the meal block above.
+  if (fridgeBlock) {
+    parts.push("", "【今送られた冷蔵庫・食材写真の解析】", fridgeBlock);
+  }
+
+  // 1日まるごと自動プラン: when this turn was an explicit "plan my day" ask, surface
+  // the user's REAL existing calendar events (or the honest not-connected note) so
+  // the coach plans AROUND them. Present only on a day-plan turn; absent otherwise.
+  if (todayEventsBlock) {
+    parts.push("", "【今日の既存の予定（1日まるごと自動プラン用）】", todayEventsBlock);
   }
 
   parts.push(
@@ -829,7 +1538,7 @@ export function buildChatPrompt(messages: ChatTurn[], ctx?: ChatContext): string
     formatTranscript(messages, coachName),
     "",
     `上記の会話に続けて、${coachName}として次の返信を1つだけ、自然な日本語のふつうの文章で書いてください。`,
-    `本文は自然な文章にし、箇条書きや JSON の体裁にはしないでください。ただし記録できる段階になったときだけ、本文の最後に食事は ${MEAL_LOG_OPEN}…${MEAL_LOG_CLOSE}、筋トレ・運動は ${WORKOUT_LOG_OPEN}…${WORKOUT_LOG_CLOSE}、睡眠は ${SLEEP_LOG_OPEN}…${SLEEP_LOG_CLOSE} のブロックを付けてよい（上記ルール参照）。それ以外の余計な体裁は不要です。`,
+    `本文は自然な文章にし、箇条書きや JSON の体裁にはしないでください。ただし記録できる段階になったときだけ、本文の最後に食事は ${MEAL_LOG_OPEN}…${MEAL_LOG_CLOSE}、筋トレ・運動の記録は ${WORKOUT_LOG_OPEN}…${WORKOUT_LOG_CLOSE}、これからやる運動メニューの提案は ${WORKOUT_PLAN_OPEN}…${WORKOUT_PLAN_CLOSE}、これから食べる献立の提案は ${MEAL_PLAN_OPEN}…${MEAL_PLAN_CLOSE}、睡眠は ${SLEEP_LOG_OPEN}…${SLEEP_LOG_CLOSE}、Googleカレンダーへの予定登録は ${CALENDAR_PLAN_OPEN}…${CALENDAR_PLAN_CLOSE} のブロックを付けてよい（上記ルール参照）。それ以外の余計な体裁は不要です。`,
   );
   return parts.join("\n");
 }

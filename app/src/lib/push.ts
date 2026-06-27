@@ -30,13 +30,9 @@ export type PushStatus =
  * Bundled VAPID public key — used only as a fallback if the (more authoritative)
  * GET /api/push/public-key fetch fails. Fetching is preferred so a server key
  * rotation doesn't require a redeploy.
- *
- * SELF-HOSTERS: the authoritative source of the VAPID public key is your API's
- * GET /api/push/public-key endpoint (driven by VAPID_PUBLIC_KEY in wrangler.toml).
- * Set your own public key here ONLY if you want a static fallback; otherwise the
- * fetch is the source of truth and this placeholder is never used in practice.
  */
-const FALLBACK_VAPID_PUBLIC_KEY = "<YOUR_VAPID_PUBLIC_KEY>";
+const FALLBACK_VAPID_PUBLIC_KEY =
+  "BOzlwBTRyg5_Ip2BKnrdh6BSmDPijVkyoUTSzR-855XqkHVmezMyQNfNKKxztqo5PDTv_BJjDsMH5-o_R3YMjW0";
 
 /**
  * Standard VAPID base64url → Uint8Array conversion for applicationServerKey.

@@ -1,12 +1,13 @@
 "use client";
 
+import { useCallback, useState } from "react";
 import { formatTime } from "@/lib/date";
 import { formatNumber } from "@/lib/workout";
 import { computeShoppingList } from "@/lib/shoppingList";
-import { dishGuideForMeal } from "@/lib/dishGuide";
+import { resolveMealCardImage } from "@/lib/mealCardImage";
+import { compressGeneratedMealImageToDataUrl } from "@/lib/image";
 import type { Meal } from "@/lib/types";
 import { PhotoImage } from "../PhotoImage";
-import { DishGuideImage } from "./DishGuideImage";
 import { MicroNutrientsPanel } from "../nutrition/MicroNutrientsPanel";
 import { PencilIcon, TrashIcon } from "../icons";
 
@@ -23,6 +24,8 @@ interface Props {
   onEat?: () => void;
   onGenerateImage?: () => void;
   generatingImage?: boolean;
+  imageError?: boolean;
+  onGeneratedImageDataUrlBackfill?: (dataUrl: string, promptText: string) => void;
 }
 
 const CONFIDENCE_JP: Record<string, string> = { low: "低", medium: "中", high: "高" };
@@ -55,61 +58,58 @@ const TYPE_STYLES: Record<string, string> = {
   間食: "bg-rose-100 text-rose-700 dark:bg-rose-400/15 dark:text-rose-300",
 };
 
-export function MealCard({ meal, onEdit, onDelete, onEat, onGenerateImage, generatingImage }: Props) {
+export function MealCard({
+  meal,
+  onEdit,
+  onDelete,
+  onEat,
+  onGenerateImage,
+  generatingImage,
+  imageError,
+  onGeneratedImageDataUrlBackfill,
+}: Props) {
   // Plan vs eaten (AIプランナー 第3陣D). ABSENT status → eaten (every pre-feature /
   // chat-logged / manual meal). A planned entry shows a 予定 chip + a 「食べた」 button
   // and a muted surface, so the user sees it's a plan and can tick it off.
   const planned = meal.status === "planned";
 
-  // Appetising dish illustration (AIプランナー 第3陣D2 — IMAGE FIGURE ONLY, never
-  // touches nutrition). ONE image per meal so the card stays clean: resolve it
-  // from the meal's name/text first, else the most-specific recognised item, else
-  // the generic default (no image-gap). We only show it when there is NO real user
-  // photo — a real photo of the food always beats an illustration; an illustration
-  // fills the visual gap for text-only / chat-logged / planned meals. The <img>
-  // onError still hides a missing/broken PNG, so it stays additive.
-  const mealPhotoIds =
-    meal.photoIds && meal.photoIds.length > 0
-      ? meal.photoIds
-      : meal.photoId
-        ? [meal.photoId]
-        : [];
-  const generatedImageId = mealPhotoIds.length === 0 ? meal.generatedImageId : undefined;
-  const dishGuide = mealPhotoIds.length > 0 || generatedImageId
-    ? null
-    : dishGuideForMeal({
-        text: meal.text,
-        itemNames: meal.nutrition?.items?.map((i) => i.name),
+  // Card image contract: every meal's representative image is generated from
+  // the menu text. User photos remain available for AI analysis, but the card
+  // does not use static templates or uploaded photos as the representative icon.
+  const imagePlan = resolveMealCardImage(meal);
+  const [backfilledImageId, setBackfilledImageId] = useState<string | null>(null);
+  const handleLegacyGeneratedBlobLoaded = useCallback(
+    (blob: Blob) => {
+      if (
+        imagePlan.syncedImageSrc ||
+        !imagePlan.legacyGeneratedImageId ||
+        backfilledImageId === imagePlan.legacyGeneratedImageId ||
+        !onGeneratedImageDataUrlBackfill
+      ) {
+        return;
+      }
+      setBackfilledImageId(imagePlan.legacyGeneratedImageId);
+      void compressGeneratedMealImageToDataUrl(blob).then((dataUrl) => {
+        if (dataUrl) onGeneratedImageDataUrlBackfill(dataUrl, imagePlan.promptText);
       });
+    },
+    [
+      backfilledImageId,
+      imagePlan.legacyGeneratedImageId,
+      imagePlan.promptText,
+      imagePlan.syncedImageSrc,
+      onGeneratedImageDataUrlBackfill,
+    ],
+  );
   const canGenerateImage =
-    !!onGenerateImage && mealPhotoIds.length === 0 && !generatedImageId && meal.text.trim().length > 0;
+    !!onGenerateImage &&
+    imagePlan.needsGeneratedImage;
   return (
     <div
       className={`surface group overflow-hidden transition duration-300 ease-spring hover:-translate-y-0.5 hover:shadow-card-hover dark:hover:shadow-card-hover-dark ${
         planned ? "border-dashed border-accent/30 bg-accent/[0.03] dark:bg-accent-light/[0.04]" : ""
       }`}
     >
-      {mealPhotoIds.length > 0 && (
-        <div className={mealPhotoIds.length === 1 ? "overflow-hidden bg-slate-100 dark:bg-navy-900" : "grid grid-cols-2 gap-1 overflow-hidden bg-slate-100 dark:bg-navy-900"}>
-          {mealPhotoIds.map((id) => (
-            <PhotoImage
-              key={id}
-              photoId={id}
-              alt={meal.text || "食事の写真"}
-              className={`${mealPhotoIds.length === 1 ? "h-44" : "h-28"} w-full object-cover transition-transform duration-500 ease-spring group-hover:scale-[1.04]`}
-            />
-          ))}
-        </div>
-      )}
-      {generatedImageId && (
-        <div className="overflow-hidden bg-slate-100 dark:bg-navy-900">
-          <PhotoImage
-            photoId={generatedImageId}
-            alt={meal.text || "生成された食事イメージ"}
-            className="h-44 w-full object-cover transition-transform duration-500 ease-spring group-hover:scale-[1.04]"
-          />
-        </div>
-      )}
       <div className="p-4">
         <div className="mb-1.5 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -156,13 +156,27 @@ export function MealCard({ meal, onEdit, onDelete, onEat, onGenerateImage, gener
             </button>
           </div>
         </div>
-        {/* Dish illustration (left) + meal text (right). The image is ADDITIVE: it
-            only renders for a meal with no real photo AND when its PNG loads, so a
-            photo'd or unillustrated meal lays out exactly as before. */}
-        {(dishGuide || meal.text) && (
+        {(imagePlan.syncedImageSrc || imagePlan.legacyGeneratedImageId || imagePlan.needsGeneratedImage || meal.text) && (
           <div className="flex items-start gap-3">
-            {dishGuide && (
-              <DishGuideImage guide={dishGuide} className="h-16 w-16 sm:h-20 sm:w-20" />
+            {imagePlan.syncedImageSrc && (
+              <img
+                src={imagePlan.syncedImageSrc}
+                alt={meal.text || "生成された食事イメージ"}
+                loading="lazy"
+                className="h-16 w-16 shrink-0 rounded-xl object-cover sm:h-20 sm:w-20"
+              />
+            )}
+            {!imagePlan.syncedImageSrc && imagePlan.legacyGeneratedImageId && (
+              <PhotoImage
+                photoId={imagePlan.legacyGeneratedImageId}
+                alt={meal.text || "生成された食事イメージ"}
+                fallback={<GeneratedMealImagePlaceholder generating={generatingImage} />}
+                onBlobLoaded={handleLegacyGeneratedBlobLoaded}
+                className="h-16 w-16 shrink-0 rounded-xl object-cover sm:h-20 sm:w-20"
+              />
+            )}
+            {!imagePlan.syncedImageSrc && !imagePlan.legacyGeneratedImageId && imagePlan.needsGeneratedImage && (
+              <GeneratedMealImagePlaceholder generating={generatingImage} />
             )}
             {meal.text && (
               <p className="min-w-0 flex-1 whitespace-pre-wrap text-[15px] leading-relaxed text-slate-700 dark:text-navy-100">
@@ -170,6 +184,12 @@ export function MealCard({ meal, onEdit, onDelete, onEat, onGenerateImage, gener
               </p>
             )}
           </div>
+        )}
+
+        {imageError && (
+          <p className="mt-2 rounded-xl bg-rose-50 px-3 py-2 text-xs font-medium text-rose-600 dark:bg-rose-500/10 dark:text-rose-300">
+            画像生成に失敗しました。少し時間をおいて再試行できます。
+          </p>
         )}
 
         {meal.nutrition && hasNutrition(meal.nutrition) && (
@@ -262,6 +282,17 @@ export function MealCard({ meal, onEdit, onDelete, onEat, onGenerateImage, gener
           </span>
         </div>
       )}
+    </div>
+  );
+}
+
+function GeneratedMealImagePlaceholder({ generating }: { generating?: boolean }) {
+  return (
+    <div
+      className="flex h-16 w-16 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-[10px] font-semibold text-slate-400 sm:h-20 sm:w-20 dark:bg-navy-800 dark:text-navy-400"
+      aria-label={generating ? "画像生成中" : "画像未生成"}
+    >
+      {generating ? "生成中" : "画像"}
     </div>
   );
 }

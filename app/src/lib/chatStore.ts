@@ -37,6 +37,22 @@ export interface ChatMessage {
    * used to resolve a later "correct" workout block from PERSISTED history.
    */
   loggedWorkout?: { exerciseIds: string[]; date: string; exerciseCount: number };
+  /**
+   * Set on the assistant turn that bulk-inserted a PLANNED workout menu (chat→運動
+   * メニュー提案, AIプランナー 第2陣C). Drives the "運動メニューをプランしました" chip.
+   * `exerciseIds` are the planned exercises' ids (on `date`), used to resolve a
+   * later "correct" WORKOUT_PLAN block from PERSISTED history. Distinct from
+   * loggedWorkout (done) so a plan correction never touches a done record.
+   */
+  plannedWorkout?: { exerciseIds: string[]; date: string; exerciseCount: number };
+  /**
+   * Set on the assistant turn that bulk-inserted a PLANNED 献立 (chat→食事メニュー提案,
+   * AIプランナー 第3陣D — the twin of plannedWorkout). Drives the "献立をプランしました"
+   * chip. `mealIds` are the planned meals' ids (on `date`), used to resolve a later
+   * "correct" MEAL_PLAN block from PERSISTED history. Distinct from loggedMeal
+   * (eaten) so a plan correction never touches an eaten record.
+   */
+  plannedMeal?: { mealIds: string[]; date: string; mealCount: number };
 }
 
 export const CHAT_STORAGE_KEY = "health-app:chat:v1";
@@ -91,6 +107,22 @@ export function clearChat(): void {
   } catch {
     /* ignore */
   }
+}
+
+/**
+ * Cheap equality for two chat histories — same length AND same (id, content)
+ * pairwise. id+content is enough to tell "the persisted history is what we're
+ * already showing" from "the server merge added/changed turns", without a deep
+ * compare. Used by ChatProvider's live-restore so re-reading after a login merge
+ * is a NO-OP when the conversation hasn't actually changed (no duplicate render,
+ * no clobber of an in-flight turn). Pure + testable.
+ */
+export function sameChatHistory(a: ChatMessage[], b: ChatMessage[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].id !== b[i].id || a[i].content !== b[i].content) return false;
+  }
+  return true;
 }
 
 /**

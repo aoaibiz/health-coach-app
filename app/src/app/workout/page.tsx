@@ -27,6 +27,13 @@ export default function WorkoutPage() {
     setEditorState(null);
   }
 
+  // 完了 (AIプランナー 第2陣C): flip a PLANNED exercise to done so it starts counting
+  // toward 成果/消費kcal. Reuses the existing updateExercise (tombstone-safe sync) —
+  // we only change the status, leaving the logged sets/reps/weight untouched.
+  function handleComplete(exercise: Exercise) {
+    updateExercise(exercise.id, { ...exercise, status: "done" });
+  }
+
   return (
     <AppShell>
       <div className="space-y-4">
@@ -45,6 +52,9 @@ export default function WorkoutPage() {
                 bodyweightKg={profile?.weightKg ?? null}
                 onEdit={() => setEditorState(ex)}
                 onDelete={() => removeExercise(ex.id)}
+                onComplete={
+                  ex.status === "planned" ? () => handleComplete(ex) : undefined
+                }
               />
             ))}
           </div>

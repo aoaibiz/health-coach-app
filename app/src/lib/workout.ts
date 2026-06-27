@@ -8,6 +8,22 @@ function isNamed(e: Exercise): boolean {
 }
 
 /**
+ * True when an exercise is a not-yet-trained PLAN (AIプランナー 第2陣C). ABSENT
+ * status means done (every pre-feature + chat-logged exercise), so ONLY the
+ * explicit "planned" returns true. A plan must not inflate today's 成果, so the
+ * aggregations below count `isDone` exercises only.
+ */
+export function isPlanned(e: Exercise): boolean {
+  return e.status === "planned";
+}
+
+/** True when an exercise is actually DONE (trained). ABSENT → done. The inverse
+ *  of isPlanned; the boundary the burn/volume/rep aggregations count. */
+export function isDone(e: Exercise): boolean {
+  return e.status !== "planned";
+}
+
+/**
  * Volume contributed by one exercise (kg). When per-set data is present
  * (Phase 5), it's the EXACT Σ weight × reps over the sets — never the scalar
  * approximation. Otherwise it's the legacy sets × reps × weight. Bodyweight
@@ -46,13 +62,15 @@ function exerciseRepsOf(e: Exercise): number {
 export function totalVolume(exercises: Exercise[]): number {
   return exercises
     .filter(isNamed)
+    .filter(isDone) // a not-yet-done plan adds no real lifted load
     .filter(isWeightedExercise)
     .reduce((sum, e) => sum + exerciseVolumeOf(e), 0);
 }
 
-/** Count of exercises that have at least a name. */
+/** Count of exercises that have at least a name AND are done (a plan isn't a
+ *  trained 種目 yet — it shouldn't bump 今日の成果 種目数). */
 export function exerciseCount(exercises: Exercise[]): number {
-  return exercises.filter(isNamed).length;
+  return exercises.filter(isNamed).filter(isDone).length;
 }
 
 /**
@@ -64,6 +82,7 @@ export function exerciseCount(exercises: Exercise[]): number {
 export function weightedExerciseCount(exercises: Exercise[]): number {
   return exercises
     .filter(isNamed)
+    .filter(isDone) // a planned lift isn't lifted yet → don't surface 総挙上量 for it
     .filter(isWeightedExercise)
     // "Real load" = positive volume. For per-set exercises that's any set with
     // weight×reps > 0; for legacy ones it reduces to the old weight > 0 check
@@ -78,6 +97,7 @@ export function weightedExerciseCount(exercises: Exercise[]): number {
 export function totalReps(exercises: Exercise[]): number {
   return exercises
     .filter(isNamed)
+    .filter(isDone) // planned reps aren't performed reps
     .reduce((sum, e) => sum + exerciseRepsOf(e), 0);
 }
 

@@ -29,9 +29,26 @@ export function CalorieRing({ net, target }: Props) {
         width={size}
         height={size}
         viewBox={`0 0 ${size} ${size}`}
-        className="-rotate-90"
+        className="-rotate-90 drop-shadow-[0_4px_12px_rgba(31,157,143,0.25)]"
         aria-hidden
       >
+        <defs>
+          {/* Gradient progress arc — depth + a premium "energy" feel vs a flat
+              single colour. Two stops in the accent family (or amber when over). */}
+          <linearGradient id="calorie-ring-grad" x1="0" y1="0" x2="1" y2="1">
+            {over ? (
+              <>
+                <stop offset="0%" stopColor="#fbbf24" />
+                <stop offset="100%" stopColor="#f59e0b" />
+              </>
+            ) : (
+              <>
+                <stop offset="0%" stopColor="#2db3a3" />
+                <stop offset="100%" stopColor="#157a6f" />
+              </>
+            )}
+          </linearGradient>
+        </defs>
         {/* Track */}
         <circle
           cx={size / 2}
@@ -49,17 +66,14 @@ export function CalorieRing({ net, target }: Props) {
           fill="none"
           strokeWidth={stroke}
           strokeLinecap="round"
+          stroke="url(#calorie-ring-grad)"
           strokeDasharray={`${dash} ${circumference}`}
-          className={
-            over
-              ? "stroke-amber-400 dark:stroke-amber-500 transition-[stroke-dasharray] duration-700"
-              : "stroke-accent dark:stroke-accent-light transition-[stroke-dasharray] duration-700"
-          }
+          className="transition-[stroke-dasharray] duration-700 ease-spring"
         />
       </svg>
 
       <div className="absolute flex flex-col items-center">
-        <span className="text-4xl font-bold leading-none tabular-nums text-slate-900 dark:text-navy-50">
+        <span className="bg-gradient-to-b from-slate-900 to-slate-600 bg-clip-text text-[2.6rem] font-bold leading-none tabular-nums text-transparent dark:from-navy-50 dark:to-navy-200">
           {formatNumber(net)}
         </span>
         <span className="mt-1 text-xs font-medium text-slate-400 dark:text-navy-300">

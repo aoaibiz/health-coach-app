@@ -116,15 +116,17 @@ describe("groundMealLogItem — 0/missing grams default to a portion (a DB food 
     expect(item.basisPer100g?.foodCode).toBe("02006");
   });
 
-  it("a db food with MISSING grams (undefined) also defaults to 100g → real DB kcal", () => {
-    // grams omitted entirely (the user said "ごはん" with no amount).
+  it("a db food with MISSING grams (undefined) defaults to its SHARED standard portion → real DB kcal", () => {
+    // grams omitted entirely (the user said "ごはん" with no amount). ごはん's shared
+    // standard portion is 茶碗1杯 = 150g — the SAME value the AI-analysis path uses,
+    // so both paths log the same grams → the same kcal (no 8 vs 10 divergence).
     const item = groundMealLogItem({
       name: "ごはん",
       source: "db",
     } as unknown as MealLogPayload["items"][number]);
     expect(item.sourceKind).toBe("db");
-    expect(item.grams).toBe(100);
-    expect(item.kcal).toBe(156); // 156/100g × 100g — never 0
+    expect(item.grams).toBe(150); // shared standard portion (rice 茶碗1杯)
+    expect(item.kcal).toBe(234); // 156/100g × 150g — never 0
     expect(item.basisPer100g?.kcal).toBe(156); // DB basis, not fabricated
   });
 
@@ -135,14 +137,16 @@ describe("groundMealLogItem — 0/missing grams default to a portion (a DB food 
   });
 
   it("the smuggled-9999 case still wins from the DB even with grams 0 (fabrication-safety intact)", () => {
-    // grams 0 → default 100g; the model's 9999 is STILL ignored (DB basis only).
+    // grams 0 → shared standard portion (ごはん茶碗1杯=150g); the model's 9999 is STILL
+    // ignored (DB basis only). The kcal is the DB row × the standard portion, never
+    // the smuggled number and never 0.
     const item = groundMealLogItem({
       name: "ごはん",
       grams: 0,
       source: "db",
       kcal: 9999,
     } as MealLogPayload["items"][number]);
-    expect(item.kcal).toBe(156); // DB 156/100g × 100g, NOT 9999, NOT 0
+    expect(item.kcal).toBe(234); // DB 156/100g × 150g, NOT 9999, NOT 0
     expect(item.basisPer100g?.kcal).toBe(156);
   });
 
@@ -251,8 +255,8 @@ describe("full chain (parse→ground→log) — a NAMED grams:0 db food logs a r
     const meal = buildLoggedMeal(payload!);
     expect(meal!.nutrition!.items).toHaveLength(1); // only ごはん logged
     const rice = meal!.nutrition!.items![0];
-    expect(rice.grams).toBe(100); // defaulted portion
-    expect(rice.kcal).toBe(156); // 156/100g × 100g — real DB number, never 0
+    expect(rice.grams).toBe(150); // shared standard portion (rice 茶碗1杯)
+    expect(rice.kcal).toBe(234); // 156/100g × 150g — real DB number, never 0
     expect(rice.basisPer100g?.kcal).toBe(156);
   });
 });
@@ -654,7 +658,7 @@ describe("buildLoggedMeal — label/estimate numbers carried from the grounded a
     expect(meal!.nutrition!.calories).toBe(190);
   });
 
-  it("a db item ignores the analysis carry-through (still DB-grounded)", () => {
+  it("a db item ignores the analysis carry-through when the analysis is also DB-grounded", () => {
     const analysis: ChatMealAnalysis = {
       ok: true,
       items: [{ name: "ごはん", grams: 150, kcal: 999, sourceKind: "db" }],
@@ -665,6 +669,26 @@ describe("buildLoggedMeal — label/estimate numbers carried from the grounded a
     );
     // db recomputes from the official DB basis regardless of the analysis number.
     expect(meal!.nutrition!.items![0].kcal).toBe(234); // DB, not the analysis 999
+  });
+
+  it("a db-tagged supplement DB miss can use the analysis estimate instead of logging 0 kcal", () => {
+    const analysis: ChatMealAnalysis = {
+      ok: true,
+      estimated: true,
+      items: [
+        { name: "プロテイン", grams: 30, kcal: 120, proteinG: 24, fatG: 1.5, carbG: 2, sourceKind: "estimate" },
+      ],
+    };
+    const meal = buildLoggedMeal(
+      { items: [{ name: "プロテイン", grams: 0, source: "db" }] },
+      { analysis },
+    );
+    const item = meal!.nutrition!.items![0];
+    expect(item.sourceKind).toBe("estimate");
+    expect(item.grams).toBe(30);
+    expect(item.kcal).toBe(120);
+    expect(item.proteinG).toBe(24);
+    expect(meal!.nutrition!.calories).toBe(120);
   });
 
   it("a label item with NO analysis match keeps the block's sanitised anchor", () => {

@@ -92,4 +92,36 @@ describe("sumIntake", () => {
     expect(r.sodiumMg).toBeNull();
     expect(r.saturatedFatG).toBeNull();
   });
+
+  // AIプランナー 第3陣D — 食事プラン: a not-yet-eaten PLAN (status "planned") must
+  // NOT inflate today's 摂取 until the user presses 「食べた」 (the twin of the
+  // workout planned-exclusion). ABSENT/eaten status are counted unchanged.
+  it("EXCLUDES not-yet-eaten planned meals from the intake total (anti-fabrication)", () => {
+    const r = sumIntake([
+      meal({ nutrition: { calories: 500, proteinG: 30, fatG: 15, carbG: 60 } }), // eaten (absent)
+      meal({ status: "planned", nutrition: { calories: 700, proteinG: 40, fatG: 20, carbG: 80 } }),
+    ]);
+    // Only the eaten meal counts; the plan adds nothing.
+    expect(r.calories).toBe(500);
+    expect(r.proteinG).toBe(30);
+    expect(r.loggedCount).toBe(1);
+  });
+
+  it("counts an explicitly EATEN meal (status 'eaten')", () => {
+    const r = sumIntake([
+      meal({ status: "eaten", nutrition: { calories: 600 } }),
+      meal({ status: "planned", nutrition: { calories: 999 } }),
+    ]);
+    expect(r.calories).toBe(600);
+    expect(r.loggedCount).toBe(1);
+  });
+
+  it("a planned meal's extra nutrients are excluded too (no fabricated planned fiber)", () => {
+    const r = sumIntake([
+      meal({ status: "planned", nutrition: { calories: 300, fiberG: 5 } }),
+    ]);
+    expect(r.calories).toBe(0);
+    expect(r.fiberG).toBeNull(); // the plan's fiber never counts
+    expect(r.loggedCount).toBe(0);
+  });
 });

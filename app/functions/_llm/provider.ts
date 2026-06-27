@@ -21,7 +21,15 @@ export interface AnalyzeInput {
   imageBase64List?: string[];
   /** Free-text description of the meal. */
   text?: string;
-  /** Analysis mode: prepared meal by default, or fridge ingredient identification. */
+  /**
+   * Analysis MODE (AIプランナー Phase2 — 冷蔵庫の写真→献立提案). Default "meal" =
+   * analyse a PREPARED meal (portions + nutrition grounding, the existing path).
+   * "fridge" = the photo is a 冷蔵庫/食材 shot — identify ONLY the visible raw
+   * ingredients (so the chat coach can propose a 献立 from them). The contract is
+   * otherwise identical (dishes[] of name/grams/source); fridge mode only changes
+   * WHAT the model is asked to identify (no fabricated portions/foods). Absent →
+   * "meal", so every existing caller is unaffected.
+   */
   mode?: "meal" | "fridge";
 }
 

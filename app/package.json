@@ -7,7 +7,7 @@
     "build": "next build",
     "build:server": "tsc -p tsconfig.server.json",
     "build:all": "next build && tsc -p tsconfig.server.json",
-    "start": "next start",
+    "start": "node server/index.mjs",
     "serve": "node server/index.mjs",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",

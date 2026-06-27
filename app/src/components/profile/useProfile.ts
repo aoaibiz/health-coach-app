@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { loadProfile, saveProfile } from "@/lib/storage";
+import { DATA_CHANGED_EVENT } from "@/lib/syncData";
 import { calcTargets } from "@/lib/nutrition";
 import type { NutritionTargets, Profile } from "@/lib/types";
 
@@ -15,8 +16,21 @@ export function useProfile() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    setProfile(loadProfile());
+    const refresh = () => setProfile(loadProfile());
+    refresh();
     setReady(true);
+    // Re-read when another tab writes (`storage`), the tab regains focus, or the
+    // cross-device live-pull / login-merge writes in THIS tab (DATA_CHANGED_EVENT,
+    // which the same-document `storage` event does not cover). Lets a profile /
+    // avatar set on another device appear here without a reload.
+    window.addEventListener("storage", refresh);
+    window.addEventListener("focus", refresh);
+    window.addEventListener(DATA_CHANGED_EVENT, refresh);
+    return () => {
+      window.removeEventListener("storage", refresh);
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener(DATA_CHANGED_EVENT, refresh);
+    };
   }, []);
 
   const save = useCallback((next: Profile) => {

@@ -2,6 +2,7 @@
 
 import type { Meal, Micros } from "./types";
 import { sumMicros } from "../../functions/_lib/micros";
+import { isMealEaten } from "./mealStatus";
 
 export interface IntakeTotals {
   calories: number;
@@ -56,8 +57,19 @@ function sumMealExtra(
   return Math.round(present.reduce((a, b) => a + b, 0) * 10) / 10;
 }
 
-/** Add up calories + PFC (+ extra nutrients) from each meal's optional nutrition. */
-export function sumIntake(meals: Meal[]): IntakeTotals {
+/**
+ * Add up calories + PFC (+ extra nutrients) from each meal's optional nutrition.
+ *
+ * ANTI-FABRICATION (AIプランナー 第3陣D — 食事プラン): not-yet-eaten PLAN meals
+ * (status "planned") are EXCLUDED here — the single chokepoint every nutrition
+ * aggregation flows through (dashboard / calendar / coachContext / history). So a
+ * proposed 献立 the user confirmed shows on the 食事画面 (with a 「食べた」 button) but
+ * NEVER inflates 摂取/PFC/達成 until the user marks it eaten — exactly like the
+ * workout side excludes `planned` from 総挙上量/消費kcal. ABSENT status → eaten, so
+ * every pre-feature + chat-logged + manual meal is counted unchanged.
+ */
+export function sumIntake(allMeals: Meal[]): IntakeTotals {
+  const meals = allMeals.filter(isMealEaten);
   const base = meals.reduce<IntakeTotals>((acc, meal) => {
     const n = meal.nutrition;
     if (!n) return acc;

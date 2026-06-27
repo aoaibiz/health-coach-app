@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getAvatar } from "@/lib/avatarStore";
+import { resolveAvatarUrl } from "@/lib/avatarStore";
 import {
   coachDisplayName,
   DEFAULT_COACH_AVATAR_SRC,
@@ -11,12 +11,14 @@ import {
 
 /**
  * The coach's chat avatar. Resolves the configured face in priority order:
- *   1. a custom uploaded photo (blob in IndexedDB, same store as profile/meal
- *      photos — reuses avatarStore), then
+ *   1. a custom uploaded photo — preferring the SYNCED data: URL
+ *      (avatarDataUrl, follows the user across devices) and falling back to the
+ *      legacy device-local IndexedDB blob (avatarPhotoId), via resolveAvatarUrl
+ *      (the SAME resolver the profile avatar uses), then
  *   2. a chosen built-in preset asset, then
  *   3. the default 健康マン mascot.
- * Falls back to the mascot while a custom blob is loading or missing. The alt
- * text uses the chosen coach name so it reads as the user's chosen person.
+ * Falls back to the preset/mascot while a custom blob is loading or missing. The
+ * alt text uses the chosen coach name so it reads as the user's chosen person.
  */
 export function CoachAvatar({
   settings,
@@ -26,20 +28,33 @@ export function CoachAvatar({
   className?: string;
 }) {
   const [customUrl, setCustomUrl] = useState<string | null>(null);
+  const avatarDataUrl = settings?.avatarDataUrl;
   const photoId = settings?.avatarPhotoId;
 
   useEffect(() => {
-    if (!photoId) {
+    if (!avatarDataUrl && !photoId) {
       setCustomUrl(null);
       return;
     }
     let revoked = false;
     let objectUrl: string | null = null;
-    getAvatar(photoId)
-      .then((blob) => {
-        if (revoked || !blob) return;
-        objectUrl = URL.createObjectURL(blob);
-        setCustomUrl(objectUrl);
+    resolveAvatarUrl({ avatarDataUrl, avatarPhotoId: photoId })
+      .then((res) => {
+        if (!res) {
+          if (!revoked) setCustomUrl(null);
+          return;
+        }
+        if (res.revoke) {
+          // If cleanup already ran (revoked), revoke right here — the cleanup saw
+          // objectUrl===null and couldn't, so a late resolve would leak.
+          if (revoked) {
+            URL.revokeObjectURL(res.url);
+            return;
+          }
+          objectUrl = res.url; // cleanup will revoke it.
+        }
+        if (revoked) return;
+        setCustomUrl(res.url);
       })
       .catch(() => {
         /* fall back to the preset / mascot */
@@ -48,7 +63,7 @@ export function CoachAvatar({
       revoked = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [photoId]);
+  }, [avatarDataUrl, photoId]);
 
   const name = coachDisplayName(settings);
   const src = customUrl ?? presetAvatarSrc(settings?.presetAvatar) ?? DEFAULT_COACH_AVATAR_SRC;

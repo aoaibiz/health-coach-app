@@ -24,14 +24,7 @@ import { buildChatPrompt, type ChatContext, type ChatTurn } from "./chat-prompt"
 /** Default per-call timeout (ms). Codex chat can take ~10-15s; on timeout we throw. */
 const DEFAULT_TIMEOUT_MS = 60_000;
 
-// LEGACY / INERT model plumbing: the active Codex CLI path runs on the ChatGPT
-// subscription and the runner explicitly does NOT pass `-m <model>` (see
-// `void model;` in defaultRunner — an Anthropic model id is rejected with HTTP
-// 400 there). So DEFAULT_CHAT_MODEL / CHAT_MODEL / MEAL_VISION_MODEL below are
-// carried through resolveModel() but have NO effect on the Codex path. They are
-// kept (not deleted) only as a seam for an alternative provider; OSS readers can
-// ignore them for the default subscription Codex setup.
-/** Default chat model — carried by config/env but inert on the Codex path. */
+/** Default chat model — overridable via env (CHAT_MODEL, then MEAL_VISION_MODEL). */
 const DEFAULT_CHAT_MODEL = "claude-haiku-4-5";
 
 export interface ChatProvider {

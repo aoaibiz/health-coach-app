@@ -16,6 +16,7 @@ import type {
   Workout,
 } from "@/lib/types";
 import type { WeightEntry } from "@/lib/weightLog";
+import { DATA_CHANGED_EVENT } from "@/lib/syncData";
 
 /** Everything the day-detail panel needs for one date. Deterministic. */
 export interface DayDetail {
@@ -79,9 +80,13 @@ export function useCalendarData(): { data: CalendarData; ready: boolean } {
     setReady(true);
     window.addEventListener("focus", refresh);
     window.addEventListener("storage", refresh);
+    // In-tab login restore (mergeOnLogin) doesn't fire `storage`; listen for the
+    // same-document signal so the calendar fills in right after login.
+    window.addEventListener(DATA_CHANGED_EVENT, refresh);
     return () => {
       window.removeEventListener("focus", refresh);
       window.removeEventListener("storage", refresh);
+      window.removeEventListener(DATA_CHANGED_EVENT, refresh);
     };
   }, []);
 

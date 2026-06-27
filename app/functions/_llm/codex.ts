@@ -37,8 +37,8 @@ import type { AnalyzeInput, AnalyzeResult, MealVisionProvider } from "./provider
 import type { Confidence, IdentifiedDish, SourceKind } from "../_lib/ground";
 import { STANDARD_PORTION_PROMPT_HINTS } from "../_lib/standard-portions";
 
-/** Default per-call timeout (ms). Codex vision can be slow; on timeout we throw. */
-const DEFAULT_TIMEOUT_MS = 60_000;
+/** Default per-call timeout (ms). Codex image generation can take more than a minute. */
+const DEFAULT_TIMEOUT_MS = 120_000;
 
 /** Generated-by label surfaced in the UI for transparency. */
 const GENERATED_BY = "codex-cli (gpt-5.5)";
@@ -480,6 +480,8 @@ const defaultImageRunner: CodexImageRunner = ({ binary, prompt, timeoutMs, stage
   const args = [
     "exec",
     "--skip-git-repo-check",
+    "--cd",
+    cwd,
     "--sandbox",
     "danger-full-access",
     "--enable",
