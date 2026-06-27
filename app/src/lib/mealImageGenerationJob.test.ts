@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   generateMealImageOnce,
   getMealImageGenerationSnapshot,
+  hasAnyPendingMealImageGeneration,
   hasPendingMealImageGeneration,
   resetMealImageGenerationJobsForTest,
+  runMealImageApplicationOnce,
   subscribeMealImageGenerationJobs,
 } from "./mealImageGenerationJob";
 
@@ -114,5 +116,40 @@ describe("generateMealImageOnce", () => {
     expect(snapshots[1]).toBeGreaterThan(snapshots[0]);
     expect(hasPendingMealImageGeneration("焼き芋")).toBe(false);
     unsubscribe();
+  });
+
+  it("keeps the prompt pending through the full browser-side apply phase", async () => {
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const first = runMealImageApplicationOnce(
+      { mealId: "meal-1", promptText: " 鮭定食 " },
+      async () => {
+        calls += 1;
+        await gate;
+        return "saved";
+      },
+    );
+    const second = runMealImageApplicationOnce(
+      { mealId: "meal-1", promptText: "鮭定食" },
+      async () => {
+        calls += 1;
+        return "duplicate";
+      },
+    );
+
+    expect(second).toBe(first);
+    expect(calls).toBe(1);
+    expect(hasPendingMealImageGeneration("鮭定食")).toBe(true);
+    expect(hasAnyPendingMealImageGeneration()).toBe(true);
+
+    release();
+    await expect(first).resolves.toBe("saved");
+
+    expect(hasPendingMealImageGeneration("鮭定食")).toBe(false);
+    expect(hasAnyPendingMealImageGeneration()).toBe(false);
   });
 });
