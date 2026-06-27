@@ -17,6 +17,48 @@ import { itemsToNutrition, setItemGrams, toMealItem } from "./mealItems";
 
 export const API_TOKEN_STORAGE_KEY = "health-app:apiToken";
 
+/**
+ * Global name the SERVER injects the shared access token under, at request time,
+ * into the served HTML (see server/index.mjs `injectAppToken`). When present it
+ * means the user is already past the login gate (AuthGate) on a server that has
+ * HEALTH_APP_TOKEN configured, so the AI features should be UNLOCKED with NO
+ * manual key entry — the user has logged in; asking for an access key on top of
+ * that is redundant (Ao feedback). It is the SAME shared value that every
+ * browser already stored in localStorage and sent on every request, so injecting
+ * it does not widen exposure.
+ *
+ * SECURITY: the token is read only on the client, used only as the
+ * X-Health-App-Token request header, and never logged or echoed elsewhere. When
+ * the env is unset the server omits the injection and the app falls back to the
+ * manual-key path (honest), so nothing breaks.
+ */
+declare global {
+  // eslint-disable-next-line no-var
+  var __HEALTH_APP_TOKEN__: string | undefined;
+}
+
+/** The server-injected shared access token, or "" when absent. SSR-safe. */
+function readInjectedToken(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    const t = (window as { __HEALTH_APP_TOKEN__?: unknown }).__HEALTH_APP_TOKEN__;
+    return typeof t === "string" ? t.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * The access token to send with AI requests: the SERVER-INJECTED shared token
+ * takes precedence (logged-in user on a configured server → no manual key), then
+ * the user's manually-stored key (advanced "use my own key" path / server with
+ * the env unset). SSR-safe (returns ""). This is the single source of truth used
+ * by analyzeMeal, chat, and hasApiKey so the unlock logic can never diverge.
+ */
+export function resolveApiToken(): string {
+  return readInjectedToken() || readStoredToken();
+}
+
 /** Shape returned by the analyze-meal function (mirrors AnalyzeMealResponse). */
 export interface AnalyzeMealApiResponse {
   items: Array<{
@@ -199,7 +241,9 @@ export interface AnalyzeMealOptions {
   endpoint?: string;
 }
 
-function readApiToken(): string {
+/** Read ONLY the manually-stored key from localStorage (the user's own key).
+ *  SSR-safe. Prefer resolveApiToken() for the actual request token. */
+function readStoredToken(): string {
   if (typeof window === "undefined") return "";
   try {
     return window.localStorage.getItem(API_TOKEN_STORAGE_KEY)?.trim() ?? "";
@@ -209,13 +253,13 @@ function readApiToken(): string {
 }
 
 /**
- * Whether an access key is configured in this browser. The key UNLOCKS the AI
- * features (photo/text analysis + 健康マン chat); without it those requests get
- * a 401. Used by the UI to surface a friendly "set your key" hint up front,
- * rather than only erroring after the user acts. SSR-safe (returns false).
+ * Whether the AI features are UNLOCKED in this browser. True when EITHER the
+ * server injected the shared token (logged-in user on a configured server → no
+ * manual key needed) OR the user stored their own key. Used by the UI to decide
+ * whether to show the friendly "set your key" hint. SSR-safe (returns false).
  */
 export function hasApiKey(): boolean {
-  return readApiToken() !== "";
+  return resolveApiToken() !== "";
 }
 
 /**
@@ -235,7 +279,7 @@ export async function analyzeMeal(
   const doFetch = options.fetchImpl ?? fetch;
   const endpoint = options.endpoint ?? "/api/analyze-meal";
   const headers: Record<string, string> = { "content-type": "application/json" };
-  const apiToken = readApiToken();
+  const apiToken = resolveApiToken();
   if (apiToken) headers["X-Health-App-Token"] = apiToken;
 
   const res = await doFetch(endpoint, {
@@ -318,3 +362,51 @@ export async function blobToBase64(blob: Blob): Promise<string> {
   const comma = dataUrl.indexOf(",");
   return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
 }
+
+export interface GenerateMealImageInput {
+  text: string;
+}
+
+export interface GenerateMealImageOptions {
+  fetchImpl?: typeof fetch;
+  endpoint?: string;
+}
+
+export interface GenerateMealImageResponse {
+  imageBase64: string;
+  mimeType: "image/png";
+  generatedBy: string;
+}
+
+/** Generate an appetising meal-title illustration through the server's Codex subscription path. */
+export async function generateMealImage(
+  input: GenerateMealImageInput,
+  options: GenerateMealImageOptions = {},
+): Promise<Blob> {
+  const text = input.text.trim();
+  if (!text) throw new Error("料理名が必要です");
+
+  const doFetch = options.fetchImpl ?? fetch;
+  const endpoint = options.endpoint ?? "/api/generate-meal-image";
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  const apiToken = resolveApiToken();
+  if (apiToken) headers["X-Health-App-Token"] = apiToken;
+
+  const res = await doFetch(endpoint, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) {
+    if (res.status === 401) throw new Error("アクセスキーを設定してください");
+    if (res.status === 503) throw new Error("画像生成は準備中です");
+    throw new Error(`画像生成に失敗しました (${res.status})`);
+  }
+  const data = (await res.json()) as GenerateMealImageResponse;
+  if (!data.imageBase64 || data.mimeType !== "image/png") {
+    throw new Error("画像生成に失敗しました");
+  }
+  const bytes = Uint8Array.from(atob(data.imageBase64), (c) => c.charCodeAt(0));
+  return new Blob([bytes], { type: data.mimeType });
+}
+

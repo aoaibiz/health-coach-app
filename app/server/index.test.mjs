@@ -46,6 +46,9 @@ describe("Node server — POST /api/analyze-meal route wiring", () => {
   it("valid text → 200 grounded JSON (DB-backed numbers, source present)", async () => {
     const res = await postJson(srv.base, { text: "ごはんと卵" });
     expect(res.status).toBe(200);
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("x-frame-options")).toBe("DENY");
+    expect(res.headers.get("content-security-policy")).toContain("default-src 'self'");
     const data = await res.json();
     expect(data.matchedCount).toBeGreaterThanOrEqual(2);
     const matched = data.items.filter((i) => i.matched);
@@ -203,8 +206,38 @@ describe("Node server — static file serving + API isolation", () => {
     try {
       const res = await fetch(`${srv.base}/api/does-not-exist`);
       expect(res.status).toBe(404);
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(res.headers.get("x-frame-options")).toBe("DENY");
+      expect(res.headers.get("content-security-policy")).toContain("default-src 'self'");
       const data = await res.json();
       expect(data.error).toBe("Not found");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("missing static asset with extension → 404, not app-shell 200", async () => {
+    const srv = await startServer(() => new MockProvider());
+    try {
+      const res = await fetch(`${srv.base}/_next/static/missing.js`);
+      expect(res.status).toBe(404);
+      expect(res.headers.get("content-type")).toContain("text/plain");
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(await res.text()).toBe("Not found");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("static html responses include security headers", async () => {
+    const srv = await startServer(() => new MockProvider());
+    try {
+      const res = await fetch(`${srv.base}/profile/`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("text/html");
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(res.headers.get("x-frame-options")).toBe("DENY");
+      expect(res.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
     } finally {
       await srv.close();
     }
@@ -216,6 +249,251 @@ describe("Node server — static file serving + API isolation", () => {
       const res = await fetch(`${srv.base}/%E0%A4%A`);
       expect(res.status).toBe(400);
       expect(await res.text()).toBe("Bad request");
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
+// Issue ②: a logged-in user (the app is behind AuthGate) must not be asked for
+// an access key. The server injects the shared token into the served HTML so the
+// client unlocks AI automatically. The on-disk export stays token-free.
+describe("Node server — access-token injection into served HTML (issue ②)", () => {
+  it("injects window.__HEALTH_APP_TOKEN__ into the served index HTML", async () => {
+    const srv = await startServer(() => new MockProvider());
+    try {
+      const res = await fetch(`${srv.base}/`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("text/html");
+      const html = await res.text();
+      expect(html).toContain(`window.__HEALTH_APP_TOKEN__=`);
+      expect(html).toContain(JSON.stringify(TEST_TOKEN));
+      // The injection sits inside <head>, before the app code runs.
+      const headIdx = html.search(/<head[^>]*>/i);
+      expect(headIdx).toBeGreaterThanOrEqual(0);
+      expect(html.indexOf("__HEALTH_APP_TOKEN__")).toBeGreaterThan(headIdx);
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("injects the token into a sub-page HTML too (e.g. /profile/)", async () => {
+    const srv = await startServer(() => new MockProvider());
+    try {
+      const res = await fetch(`${srv.base}/profile/`);
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).toContain(`window.__HEALTH_APP_TOKEN__=`);
+      expect(html).toContain(JSON.stringify(TEST_TOKEN));
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("omits the injection when HEALTH_APP_TOKEN is unset (manual-key fallback)", async () => {
+    const srv = await startServer(() => new MockProvider(), { token: "" });
+    try {
+      const res = await fetch(`${srv.base}/`);
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).not.toContain("__HEALTH_APP_TOKEN__");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("does NOT modify the on-disk export (no token leak in the artifact)", async () => {
+    // Read the static file directly; it must never contain the token.
+    const { readFile } = await import("node:fs/promises");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, join } = await import("node:path");
+    const here = dirname(fileURLToPath(import.meta.url));
+    const onDisk = await readFile(join(here, "..", "out", "index.html"), "utf8");
+    expect(onDisk).not.toContain("__HEALTH_APP_TOKEN__");
+    expect(onDisk).not.toContain(TEST_TOKEN);
+  });
+
+  it("escapes the token so it cannot break out of the <script> element", async () => {
+    // A hostile token containing </script> must be neutralised (defense-in-depth;
+    // the real token is opaque, but the escaping must hold regardless).
+    const evil = `a</script><script>alert(1)</script>`;
+    const srv = await startServer(() => new MockProvider(), { token: evil });
+    try {
+      const res = await fetch(`${srv.base}/`);
+      const html = await res.text();
+      // The raw closing tag from the token must NOT appear verbatim; it is
+      // escaped to </script> inside the JS string literal.
+      expect(html).not.toContain(`a</script><script>alert(1)</script>`);
+      expect(html).toContain("\\u003c");
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
+// Issue ②: the served HTML navigation document must NOT be heuristically cached
+// by the browser/CDN. Without a Cache-Control header browsers invent a freshness
+// TTL and serve a STALE shell — keeping the OLD bundle refs AND skipping the
+// request-time token injection, which is what surfaced "access-key screen on an
+// already-logged-in session" / "deploys don't reach the user". Hashed assets
+// (content-addressed) stay cacheable.
+describe("Node server — HTML cache-control (issue ②: no stale shell)", () => {
+  it("index HTML carries no-cache so a new deploy always reaches the user", async () => {
+    const srv = await startServer(() => new MockProvider());
+    try {
+      const res = await fetch(`${srv.base}/`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("text/html");
+      const cc = res.headers.get("cache-control") || "";
+      expect(cc).toContain("no-cache");
+      expect(cc).toContain("must-revalidate");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("sub-page HTML (e.g. /profile/) also carries no-cache", async () => {
+    const srv = await startServer(() => new MockProvider());
+    try {
+      const res = await fetch(`${srv.base}/profile/`);
+      expect(res.status).toBe(200);
+      const cc = res.headers.get("cache-control") || "";
+      expect(cc).toContain("no-cache");
+      expect(cc).toContain("must-revalidate");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("the SPA fallback shell also carries no-cache", async () => {
+    const srv = await startServer(() => new MockProvider());
+    try {
+      // An extensionless unknown route serves the app shell (client routing).
+      const res = await fetch(`${srv.base}/some-client-route`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("text/html");
+      const cc = res.headers.get("cache-control") || "";
+      expect(cc).toContain("no-cache");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("hashed static assets are NOT forced no-cache (immutable, content-addressed)", async () => {
+    // Discover a REAL hashed asset from the export so this never hard-codes a
+    // build-specific hash (which changes every `next build`).
+    const { readdir } = await import("node:fs/promises");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, join } = await import("node:path");
+    const here = dirname(fileURLToPath(import.meta.url));
+    const buildsDir = join(here, "..", "out", "_next", "static");
+    const entries = await readdir(buildsDir, { withFileTypes: true });
+    const buildDir = entries.find(
+      (e) => e.isDirectory() && e.name !== "chunks" && e.name !== "css" && e.name !== "media",
+    );
+    if (!buildDir) return; // no build-hash dir in this export → nothing to assert.
+
+    const srv = await startServer(() => new MockProvider());
+    try {
+      const res = await fetch(`${srv.base}/_next/static/${buildDir.name}/_buildManifest.js`);
+      // Asset exists in the export → 200, JS, and NOT marked no-cache by us.
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("javascript");
+      const cc = res.headers.get("cache-control");
+      // We only set cache-control on HTML + sw.js; a hashed asset has none from us.
+      expect(cc === null || !cc.includes("no-cache")).toBe(true);
+    } finally {
+      await srv.close();
+    }
+  });
+});
+async function postImageJson(base, body, raw, token = TEST_TOKEN) {
+  const headers = { "content-type": "application/json" };
+  if (token) headers["X-Health-App-Token"] = token;
+  return fetch(`${base}/api/generate-meal-image`, {
+    method: "POST",
+    headers,
+    body: raw !== undefined ? raw : JSON.stringify(body),
+  });
+}
+
+describe("Node server - POST /api/generate-meal-image route wiring", () => {
+  it("missing/incorrect token -> 401 before body handling", async () => {
+    const srv = await startServer(() => new MockProvider(), {
+      makeImageProvider: () => ({
+        async generateMealImage() {
+          throw new Error("should not run");
+        },
+      }),
+    });
+    try {
+      const res = await postImageJson(srv.base, undefined, "x".repeat(10_000_000), "");
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: "unauthorized" });
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("valid text -> 200 with injected fake image provider", async () => {
+    let sawText = "";
+    const srv = await startServer(() => new MockProvider(), {
+      makeImageProvider: () => ({
+        async generateMealImage(input) {
+          sawText = input.text;
+          return {
+            imageBase64: Buffer.from("fake-png").toString("base64"),
+            mimeType: "image/png",
+            generatedBy: "fake-image-provider",
+          };
+        },
+      }),
+    });
+    try {
+      const res = await postImageJson(srv.base, { text: "鮭定食" });
+      expect(res.status).toBe(200);
+      expect(sawText).toBe("鮭定食");
+      const data = await res.json();
+      expect(data.mimeType).toBe("image/png");
+      expect(data.imageBase64).toBe(Buffer.from("fake-png").toString("base64"));
+      expect(data.generatedBy).toBe("fake-image-provider");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("fake provider missing codex -> 503 image_generation_unavailable", async () => {
+    const srv = await startServer(() => new MockProvider(), {
+      makeImageProvider: () => ({
+        async generateMealImage() {
+          throw new Error("CODEX_NOT_FOUND");
+        },
+      }),
+    });
+    try {
+      const res = await postImageJson(srv.base, { text: "ごはん" });
+      expect(res.status).toBe(503);
+      const data = await res.json();
+      expect(data.error).toBe("image_generation_unavailable");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("fake provider timeout/parse failure -> 502 without image data", async () => {
+    const srv = await startServer(() => new MockProvider(), {
+      makeImageProvider: () => ({
+        async generateMealImage() {
+          throw new Error("CODEX_TIMEOUT");
+        },
+      }),
+    });
+    try {
+      const res = await postImageJson(srv.base, { text: "ごはん" });
+      expect(res.status).toBe(502);
+      const data = await res.json();
+      expect(data.imageBase64).toBeUndefined();
+      expect(data.error).toBeTruthy();
     } finally {
       await srv.close();
     }

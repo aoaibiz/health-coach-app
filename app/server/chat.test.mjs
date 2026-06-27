@@ -41,6 +41,9 @@ describe("Node server — POST /api/chat route wiring", () => {
         context: { goal: "減量", targetKcal: 1800 },
       });
       expect(res.status).toBe(200);
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(res.headers.get("x-frame-options")).toBe("DENY");
+      expect(res.headers.get("content-security-policy")).toContain("default-src 'self'");
       const data = await res.json();
       expect(data.reply).toBe("がんばろう！");
     } finally {

@@ -1,6 +1,7 @@
 import { afterEach, describe, it, expect } from "vitest";
 import {
   API_TOKEN_STORAGE_KEY,
+  generateMealImage,
   analyzeMeal,
   estimateSingleItem,
   hasApiKey,
@@ -40,11 +41,17 @@ function fetchReturning(res: Response): typeof fetch {
   return (async () => res) as unknown as typeof fetch;
 }
 
-function setWindowLocalStorage(values: Record<string, string>) {
+function setWindowLocalStorage(
+  values: Record<string, string>,
+  opts: { injectedToken?: string } = {},
+) {
   const store = new Map(Object.entries(values));
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: {
+      // Server-injected shared token (server/index.mjs sets this on window). When
+      // present it unlocks AI without a manual key (logged-in user).
+      __HEALTH_APP_TOKEN__: opts.injectedToken,
       localStorage: {
         getItem: (key: string) => store.get(key) ?? null,
         setItem: (key: string, value: string) => store.set(key, value),
@@ -75,6 +82,21 @@ describe("hasApiKey — access-key presence (unlocks AI features)", () => {
   it("is true once a non-blank key is stored", () => {
     setWindowLocalStorage({ [API_TOKEN_STORAGE_KEY]: "secret-token" });
     expect(hasApiKey()).toBe(true);
+  });
+
+  // Issue ②: a logged-in user on a server with HEALTH_APP_TOKEN configured gets
+  // window.__HEALTH_APP_TOKEN__ injected → AI is unlocked with NO manual key.
+  it("is true when the server injected a token, even with no stored key", () => {
+    setWindowLocalStorage({}, { injectedToken: "injected-shared-token" });
+    expect(hasApiKey()).toBe(true);
+  });
+
+  it("falls back to the stored key when the server did not inject a token", () => {
+    // injectedToken undefined (env unset) → only the manual key counts.
+    setWindowLocalStorage({ [API_TOKEN_STORAGE_KEY]: "my-own-key" });
+    expect(hasApiKey()).toBe(true);
+    setWindowLocalStorage({}, { injectedToken: "" });
+    expect(hasApiKey()).toBe(false);
   });
 });
 
@@ -417,6 +439,33 @@ describe("analyzeMeal — success", () => {
     await analyzeMeal({ text: "ごはん" }, { fetchImpl });
     expect(headers!.has("X-Health-App-Token")).toBe(false);
   });
+
+  // Issue ②: the server-injected token is sent even when no manual key is stored.
+  it("sends the SERVER-INJECTED token when no key is stored (login unlock)", async () => {
+    setWindowLocalStorage({}, { injectedToken: "injected-shared-token" });
+    let headers: Headers;
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      headers = new Headers(init?.headers);
+      return new Response(JSON.stringify(apiResponse()), { status: 200 });
+    }) as unknown as typeof fetch;
+    await analyzeMeal({ text: "ごはん" }, { fetchImpl });
+    expect(headers!.get("X-Health-App-Token")).toBe("injected-shared-token");
+  });
+
+  // Issue ②: the injected token takes precedence over a stale stored one.
+  it("prefers the server-injected token over the stored key", async () => {
+    setWindowLocalStorage(
+      { [API_TOKEN_STORAGE_KEY]: "stale-stored" },
+      { injectedToken: "injected-shared-token" },
+    );
+    let headers: Headers;
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      headers = new Headers(init?.headers);
+      return new Response(JSON.stringify(apiResponse()), { status: 200 });
+    }) as unknown as typeof fetch;
+    await analyzeMeal({ text: "ごはん" }, { fetchImpl });
+    expect(headers!.get("X-Health-App-Token")).toBe("injected-shared-token");
+  });
 });
 
 describe("analyzeMeal — offline / failure path (record is kept by caller)", () => {
@@ -546,5 +595,47 @@ describe("estimateSingleItem — DB-miss auto-estimate (honest 推定値, never 
     expect(item).not.toBeNull();
     expect(item!.sourceKind).toBe("db");
     expect(item!.kcal!).toBeGreaterThan(0);
+  });
+});
+
+
+describe("generateMealImage - server bridge", () => {
+  it("sends X-Health-App-Token from resolveApiToken and returns a PNG Blob", async () => {
+    setWindowLocalStorage({}, { injectedToken: "injected-shared-token" });
+    let headers: Headers;
+    let bodyText = "";
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      headers = new Headers(init?.headers);
+      bodyText = String(init?.body);
+      return new Response(
+        JSON.stringify({
+          imageBase64: btoa("fake-png"),
+          mimeType: "image/png",
+          generatedBy: "fake",
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+    const blob = await generateMealImage({ text: "鮭定食" }, { fetchImpl });
+    expect(headers!.get("X-Health-App-Token")).toBe("injected-shared-token");
+    expect(JSON.parse(bodyText)).toEqual({ text: "鮭定食" });
+    expect(blob.type).toBe("image/png");
+    expect(await blob.text()).toBe("fake-png");
+  });
+
+  it("maps 401 to the honest access-key setup message", async () => {
+    setWindowLocalStorage({});
+    const fetchImpl = fetchReturning(new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 }));
+    await expect(generateMealImage({ text: "ごはん" }, { fetchImpl })).rejects.toThrow(
+      "アクセスキーを設定してください",
+    );
+  });
+
+  it("throws on non-OK image generation errors without fabricating a Blob", async () => {
+    setWindowLocalStorage({ [API_TOKEN_STORAGE_KEY]: "secret-token" });
+    const fetchImpl = fetchReturning(new Response(JSON.stringify({ error: "fail" }), { status: 502 }));
+    await expect(generateMealImage({ text: "ごはん" }, { fetchImpl })).rejects.toThrow(
+      "画像生成に失敗しました",
+    );
   });
 });

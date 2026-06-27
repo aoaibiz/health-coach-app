@@ -200,6 +200,19 @@ export interface MealNutrition {
   items?: MealItem[];
 }
 
+/**
+ * Whether a meal is a not-yet-eaten PLAN or actually EATEN (AIプランナー 第3陣D —
+ * 食事フロー, the exact twin of ExerciseStatus). ABSENT (on every pre-feature +
+ * chat-logged + manually-entered meal) means eaten; only the explicit `"planned"`
+ * is the new plan state. Kept as a named type so the planned/eaten filter and the
+ * 「食べた」 button read the same contract everywhere.
+ */
+export type MealStatus = "planned" | "eaten";
+
+/**
+ * One step of a recipe card (AIプランナー 第3陣D — レシピカード②). A free-text
+ * line the coach generated. Optional/additive: a plain logged meal has none.
+ */
 export interface Meal {
   id: string;
   /** ISO date (YYYY-MM-DD) the meal belongs to. */
@@ -208,10 +221,59 @@ export interface Meal {
   timestamp: string;
   type: MealType;
   text: string;
-  /** IndexedDB key of the photo, if one was attached. */
+  /** IndexedDB key of the first/legacy photo, if one was attached. */
   photoId?: string;
+  /** IndexedDB keys of all photos attached to this meal. Optional + additive; photoId remains the first photo for legacy records. */
+  photoIds?: string[];
+  /** IndexedDB key of an AI-generated meal-title illustration. Real user photos always win. */
+  generatedImageId?: string;
   /** Optional user-entered calories + PFC for this meal (Phase 1: manual). */
   nutrition?: MealNutrition;
+  /**
+   * Plan vs eaten state (AIプランナー 第3陣D — 食事フロー, the twin of
+   * Exercise.status). When the coach proposes a 献立 and the user confirms it, the
+   * meals are bulk-inserted as `"planned"` (a プラン, not yet eaten). The 「食べた」
+   * button on the 食事カード flips one to `"eaten"`. Optional + additive: ABSENT
+   * means eaten (every meal that existed before this feature — including every
+   * chat-logged + manually-entered meal — is treated as eaten). Only the explicit
+   * value `"planned"` is special, so:
+   *   - 摂取カロリー/PFC/達成 (sumIntake/dashboard/coachContext) count EATEN meals
+   *     only — a not-yet-eaten plan never inflates today's totals (see isMealEaten).
+   *   - the 食事画面 still SHOWS planned ones (with a 「食べた」 button) so the user can
+   *     eat them and tick them off.
+   * Pre-existing records load fine (undefined → eaten), and the chat MEAL_LOG path
+   * is unchanged (it never sets a status → its entries stay eaten).
+   */
+  status?: MealStatus;
+  /**
+   * Optional recipe card (AIプランナー 第3陣D — レシピカード②): ingredient lines +
+   * step lines the coach GENERATED for a proposed 献立. Additive/optional — only a
+   * MEAL_PLAN meal carries it; a logged/manual meal has none. The steps are the
+   * coach's prose (never auto-invented from items): anti-fabrication is the model's
+   * responsibility (don't add ingredients the photo/plan didn't have), and the
+   * NUMBERS still come from the grounded `nutrition` items, never this card.
+   */
+  recipe?: MealRecipe;
+}
+
+/**
+ * A recipe card for a planned meal (AIプランナー 第3陣D — レシピカード②). Pure
+ * presentation: ingredient + step text the coach wrote. Both arrays are optional
+ * (a card may carry only ingredients, or only steps); empty/absent → no card.
+ */
+export interface MealRecipe {
+  /** Ingredient lines (e.g. "鶏むね肉 100g", "卵 2個"). */
+  ingredients?: string[];
+  /** Step lines, in order (e.g. "鶏肉を一口大に切る"). */
+  steps?: string[];
+  /**
+   * Ingredients the user already has ON HAND (買い物リスト⑤ — from the Phase2 fridge
+   * photo the coach saw). Optional/additive: only set when the plan came from a
+   * fridge context. The 買い物リスト is computed CLIENT-SIDE (computeShoppingList) as
+   * `ingredients` − `onHand`, so an on-hand item is never put on the shopping list,
+   * and nothing is fabricated (the coach only lists what the photo actually showed).
+   */
+  onHand?: string[];
 }
 
 /**
@@ -274,7 +336,31 @@ export interface Exercise {
    * burn estimate are unchanged.
    */
   intensity?: IntensityLevel;
+  /**
+   * Plan vs done state (AIプランナー 第2陣C — 運動フロー). When the coach proposes a
+   * workout and the user confirms it, the exercises are bulk-inserted as
+   * `"planned"` (a プラン, not yet trained). The 完了 button on the 筋トレ card flips
+   * one to `"done"` (actually trained). Optional + additive: ABSENT means done
+   * (every exercise that existed before this feature — including every chat-logged
+   * 筋トレ, which records what already happened — is treated as done). Only the
+   * explicit value `"planned"` is special, so:
+   *   - 成果/消費カロリー/総挙上量/履歴 (burn/volume/aggregations) count DONE exercises
+   *     only — a not-yet-done plan never inflates today's totals (see isPlanned).
+   *   - the 筋トレ画面 still SHOWS planned ones (with a 完了 button) so the user can
+   *     do them and tick them off.
+   * Pre-existing records load fine (undefined → done), and the chat WORKOUT_LOG
+   * path is unchanged (it never sets a status → its entries stay done).
+   */
+  status?: ExerciseStatus;
 }
+
+/**
+ * Whether an exercise is a not-yet-trained PLAN or actually DONE (AIプランナー
+ * 第2陣C). ABSENT (on every pre-feature + chat-logged exercise) means done; only
+ * the explicit `"planned"` is the new plan state. Kept as a named type so the
+ * planned/done filter and the 完了 button read the same contract everywhere.
+ */
+export type ExerciseStatus = "planned" | "done";
 
 export interface Workout {
   /** ISO date (YYYY-MM-DD) — one workout document per day. */
@@ -353,8 +439,22 @@ export interface Profile {
    * store as meal photos (see photoStore.ts). Only the id ref lives on the
    * profile in localStorage; the blob stays in IndexedDB. Additive/optional, so
    * existing saved profiles remain valid.
+   *
+   * @deprecated Device-local only — an IndexedDB ref does NOT cross devices, so
+   * the avatar "disappeared" after a device switch. New saves embed the image in
+   * `avatarDataUrl` (below) instead, which rides the synced profile blob. Still
+   * READ as a fallback so profiles saved before the change keep showing on the
+   * SAME device.
    */
   avatarPhotoId?: string;
+  /**
+   * Optional avatar image as a small compressed JPEG **data: URL** (see
+   * compressAvatarToDataUrl). UNLIKE avatarPhotoId this lives ON the profile, so
+   * it is part of the synced profile blob and follows the user across devices
+   * (fixes "プロフィール写真が消える"). Bounded (≤ ~180KB) so it never bloats the
+   * per-section sync budget. Additive/optional → existing profiles load fine.
+   */
+  avatarDataUrl?: string;
   updatedAt: string;
 }
 

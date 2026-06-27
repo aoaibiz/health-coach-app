@@ -20,11 +20,11 @@ import { createServer } from "node:http";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join, normalize, extname } from "node:path";
-import { timingSafeEqual } from "node:crypto";
 
 import { handleAnalyzeMeal } from "../dist/functions/api/analyze-meal.js";
+import { CodexProvider } from "../dist/functions/_llm/codex.js";
 import { handleChat } from "../dist/functions/api/chat.js";
-import { makeMealProvider, makeChatProvider } from "../dist/functions/_llm/select.js";
+import { CodexChatProvider } from "../dist/functions/_llm/chat.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = join(__dirname, "..", "out");
@@ -33,6 +33,17 @@ const DEFAULT_MAX_CONCURRENCY = 2;
 
 /** ~9.5MB → comfortably above the 9MB base64 cap the handler enforces (413). */
 const MAX_BODY_BYTES = 9_500_000;
+
+/**
+ * Cache-Control for HTML navigation documents (every route's index.html + the SPA
+ * fallback). Without an explicit header browsers apply a HEURISTIC freshness
+ * lifetime and may serve a STALE shell — keeping the old bundle refs AND skipping
+ * the request-time token injection, which is what surfaced the "access-key screen
+ * on an already-logged-in session" report. `no-cache` forces a revalidation on
+ * every navigation (a 304 is cheap), so a deploy reaches users immediately.
+ * Hashed assets (_next/static/...) are content-addressed and stay cacheable.
+ */
+const HTML_CACHE_CONTROL = "no-cache, must-revalidate";
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -46,24 +57,41 @@ const MIME = {
   ".jpeg": "image/jpeg",
   ".webp": "image/webp",
   ".ico": "image/x-icon",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
   ".woff": "font/woff",
   ".woff2": "font/woff2",
   ".map": "application/json; charset=utf-8",
 };
 
-// Baseline security headers emitted on every static response. Mirrored in
-// public/_headers for a Cloudflare Pages deploy. CSP is intentionally NOT set
-// here: the app injects an inline theme-init script in layout.tsx that would
-// need a per-build hash/nonce; see the `# TODO CSP` note in public/_headers.
 const SECURITY_HEADERS = {
+  "content-security-policy": [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+    "img-src 'self' data: blob:",
+    "style-src 'self' 'unsafe-inline'",
+    "script-src 'self' 'unsafe-inline'",
+    "connect-src 'self' https://health-api.mogubusi.trade",
+    "worker-src 'self'",
+    "manifest-src 'self'",
+  ].join("; "),
+  "cross-origin-resource-policy": "same-origin",
+  "permissions-policy": "camera=(), microphone=(), geolocation=()",
+  "referrer-policy": "no-referrer",
+  "strict-transport-security": "max-age=31536000; includeSubDomains",
   "x-content-type-options": "nosniff",
-  "referrer-policy": "strict-origin-when-cross-origin",
   "x-frame-options": "DENY",
 };
 
+function withSecurityHeaders(headers = {}) {
+  return { ...SECURITY_HEADERS, ...headers };
+}
+
 function sendJson(res, status, data) {
   const body = JSON.stringify(data);
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+  res.writeHead(status, withSecurityHeaders({ "content-type": "application/json; charset=utf-8" }));
   res.end(body);
 }
 
@@ -72,17 +100,45 @@ function configuredToken(options = {}) {
 }
 
 /**
- * Constant-time string equality for the x-health-app-token check, to avoid the
- * timing side-channel of a short-circuiting `!==`. Length check first (lengths
- * are not secret), then crypto.timingSafeEqual over the bytes (it requires equal
- * lengths). Behaviour is identical to `a === b` for the auth decision.
+ * Escape a string for SAFE embedding inside a JSON string literal that sits in an
+ * inline <script>. JSON.stringify handles quotes/backslashes/control chars; we
+ * additionally neutralise `<` (so `</script>` / `<!--` can never break out of the
+ * script element) and the JS line separators. The result is a valid JS string
+ * literal that cannot escape the script context, regardless of the token's bytes.
  */
-function tokensMatch(provided, expected) {
-  if (typeof provided !== "string") return false;
-  const a = Buffer.from(provided);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
+function jsonForScript(value) {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+/**
+ * Inject the shared access token onto `window.__HEALTH_APP_TOKEN__` so a
+ * logged-in user (the app is behind AuthGate) gets the AI features unlocked with
+ * NO manual access-key entry (Ao feedback: login already authenticates the user).
+ *
+ * - Injected at REQUEST time into the served HTML — the static export on disk
+ *   never contains the token, so a `git`/CDN artifact can't leak it.
+ * - Only when HEALTH_APP_TOKEN is configured; otherwise the HTML is served
+ *   unchanged and the client falls back to the manual-key path (honest).
+ * - The SAME shared value the client already stored in localStorage and sent on
+ *   every request — injecting it does not widen exposure. It is read only on the
+ *   client and used solely as the X-Health-App-Token header.
+ *
+ * The inline script is allowed by the CSP (`script-src 'self' 'unsafe-inline'`).
+ * Inserted right after the opening <head> so it runs before app code. Returns the
+ * HTML unchanged when there's no <head> or no token.
+ */
+function injectAppToken(html, token) {
+  if (!token) return html;
+  const snippet = `<script>window.__HEALTH_APP_TOKEN__=${jsonForScript(token)};</script>`;
+  // Insert after the first opening <head ...> tag.
+  const m = html.match(/<head[^>]*>/i);
+  if (!m) return html; // no head → leave untouched (manual-key fallback still works).
+  const idx = m.index + m[0].length;
+  return html.slice(0, idx) + snippet + html.slice(idx);
 }
 
 function configuredMaxConcurrency(options = {}) {
@@ -154,27 +210,21 @@ function codexErrorResponse(err) {
   };
 }
 
-/**
- * Default provider factories — route through select.ts so the AI backend is env-
- * driven (AI_MODE/AI_PROVIDER). With AI_MODE unset / "local-codex" (the default),
- * this returns the subscription Codex providers exactly as before, so OUR / FAMILY
- * Node instances are UNCHANGED. A member self-host can set AI_MODE=own +
- * AI_PROVIDER=gemini + GEMINI_API_KEY to run on their own key instead.
- */
+/** Default provider factory — the ACTIVE path (real Codex CLI, no API key). */
 function defaultMakeProvider() {
-  return makeMealProvider(process.env);
+  return new CodexProvider();
 }
 
-/** Default chat provider factory — env-driven via select.ts (default Codex). */
+/** Default chat provider factory — the ACTIVE path (real Codex CLI, no API key). */
 function defaultMakeChatProvider() {
-  return makeChatProvider(process.env);
+  return new CodexChatProvider();
 }
 
-/**
- * The POST /api/analyze-meal route. Exported + given an injectable provider
- * factory so tests can drive it with a MockProvider (no CLI, no network) while
- * production uses CodexProvider. Returns the same contract as the old CF func.
- */
+/** Default image provider factory - Codex CLI subscription + image_generation. */
+function defaultMakeImageProvider() {
+  return new CodexProvider();
+}
+
 export async function handleAnalyzeMealRoute(
   req,
   res,
@@ -195,7 +245,7 @@ export async function handleAnalyzeMealRoute(
     return;
   }
 
-  if (!tokensMatch(req.headers["x-health-app-token"], token)) {
+  if (req.headers["x-health-app-token"] !== token) {
     sendJson(res, 401, { error: "unauthorized" });
     return;
   }
@@ -223,18 +273,12 @@ export async function handleAnalyzeMealRoute(
       return;
     }
 
-    // Rebuild a WHATWG Request so we can reuse the pure, framework-free handler
-    // verbatim (same validation, same grounding, same response shape).
     const request = new Request("http://localhost/api/analyze-meal", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: raw,
     });
 
-    // Wrap the provider so we can observe WHICH error it threw. The pure handler
-    // swallows provider errors into a generic 502; this lets the route remap a
-    // missing/unauthed codex binary to 503 WITHOUT touching the shared handler
-    // and WITHOUT calling the provider twice. The wrapper never alters the result.
     const inner = makeProvider();
     let providerError = null;
     const provider = {
@@ -249,9 +293,6 @@ export async function handleAnalyzeMealRoute(
     };
 
     const result = await handleAnalyzeMeal(request, provider);
-
-    // handleAnalyzeMeal returns 502 for ANY provider throw. If that throw was a
-    // missing/unauthed codex binary, report 503 (analysis unavailable) instead.
     if (result.status === 502 && providerError) {
       const mapped = codexErrorResponse(providerError);
       sendJson(res, mapped.status, mapped.body);
@@ -259,19 +300,91 @@ export async function handleAnalyzeMealRoute(
     }
 
     const text = await result.text();
-    res.writeHead(result.status, { "content-type": "application/json; charset=utf-8" });
+    res.writeHead(result.status, withSecurityHeaders({ "content-type": "application/json; charset=utf-8" }));
     res.end(text);
   } finally {
     if (semaphore) semaphore.release();
   }
 }
 
-/**
- * The POST /api/chat route. Token-gated + concurrency-capped IDENTICALLY to
- * /api/analyze-meal (fail-closed 503 when the token env is unset, 401 on
- * mismatch, shared semaphore). Injectable provider factory so tests drive it
- * with a MockChatProvider (no CLI, no network). Honest errors, never fabricates.
- */
+export async function handleGenerateMealImageRoute(
+  req,
+  res,
+  makeProvider = defaultMakeImageProvider,
+  options = {},
+) {
+  if (req.method !== "POST") {
+    sendJson(res, 405, { error: "Method not allowed" });
+    return;
+  }
+  const token = configuredToken(options);
+  if (!token) {
+    sendJson(res, 503, { error: "image_generation_unavailable", message: "画像生成は準備中です。" });
+    return;
+  }
+  if (req.headers["x-health-app-token"] !== token) {
+    sendJson(res, 401, { error: "unauthorized" });
+    return;
+  }
+  const semaphore = options.semaphore;
+  const acquired = semaphore ? semaphore.acquire() : true;
+  if (!acquired) {
+    sendJson(res, 503, { error: "busy", message: "混み合っています。少し後でお試しください。" });
+    return;
+  }
+  try {
+    let raw;
+    try {
+      raw = await readBody(req);
+    } catch (err) {
+      sendJson(res, err && err.tooLarge ? 413 : 400, { error: err && err.tooLarge ? "リクエストが大きすぎます" : "Invalid request body" });
+      return;
+    }
+    let body;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      sendJson(res, 400, { error: "Invalid request body" });
+      return;
+    }
+    const text = typeof body.text === "string" ? body.text.trim() : "";
+    if (!text) {
+      sendJson(res, 400, { error: "text required" });
+      return;
+    }
+    try {
+      const data = await makeProvider().generateMealImage({ text });
+      sendJson(res, 200, data);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg === "CODEX_NOT_FOUND") {
+        sendJson(res, 503, { error: "image_generation_unavailable", message: "画像生成が今使えません。少し後でお試しください。" });
+        return;
+      }
+      sendJson(res, 502, { error: "画像生成に失敗しました。あとで再試行できます。" });
+    }
+  } finally {
+    if (semaphore) semaphore.release();
+  }
+}
+
+function chatErrorResponse(err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg === "CODEX_NOT_FOUND") {
+    return {
+      status: 503,
+      body: {
+        error: "chat_unavailable",
+        message: "チャット返信が今使えません。あとで再試行できます。",
+      },
+    };
+  }
+  return {
+    status: 502,
+    body: { error: "返信を生成できませんでした。あとで再試行できます。" },
+  };
+}
+
 export async function handleChatRoute(
   req,
   res,
@@ -287,12 +400,12 @@ export async function handleChatRoute(
   if (!token) {
     sendJson(res, 503, {
       error: "chat_unavailable",
-      message: "チャットは準備中です。",
+      message: "チャット返信は準備中です。",
     });
     return;
   }
 
-  if (!tokensMatch(req.headers["x-health-app-token"], token)) {
+  if (req.headers["x-health-app-token"] !== token) {
     sendJson(res, 401, { error: "unauthorized" });
     return;
   }
@@ -312,11 +425,9 @@ export async function handleChatRoute(
     try {
       raw = await readBody(req);
     } catch (err) {
-      if (err && err.tooLarge) {
-        sendJson(res, 413, { error: "リクエストが大きすぎます" });
-      } else {
-        sendJson(res, 400, { error: "Invalid request body" });
-      }
+      sendJson(res, err && err.tooLarge ? 413 : 400, {
+        error: err && err.tooLarge ? "リクエストが大きすぎます" : "Invalid request body",
+      });
       return;
     }
 
@@ -326,8 +437,6 @@ export async function handleChatRoute(
       body: raw,
     });
 
-    // Wrap the provider so we can observe WHICH error it threw and remap a
-    // missing/unauthed codex binary to 503 WITHOUT touching the shared handler.
     const inner = makeProvider();
     let providerError = null;
     const provider = {
@@ -342,23 +451,14 @@ export async function handleChatRoute(
     };
 
     const result = await handleChat(request, provider);
-
-    // handleChat returns 502 for ANY provider throw. If that throw was a
-    // missing/unauthed codex binary, report 503 (chat unavailable) instead.
     if (result.status === 502 && providerError) {
-      const msg =
-        providerError instanceof Error ? providerError.message : String(providerError);
-      if (msg === "CODEX_NOT_FOUND") {
-        sendJson(res, 503, {
-          error: "chat_unavailable",
-          message: "チャットが今使えません。少し後でお試しください。",
-        });
-        return;
-      }
+      const mapped = chatErrorResponse(providerError);
+      sendJson(res, mapped.status, mapped.body);
+      return;
     }
 
     const text = await result.text();
-    res.writeHead(result.status, { "content-type": "application/json; charset=utf-8" });
+    res.writeHead(result.status, withSecurityHeaders({ "content-type": "application/json; charset=utf-8" }));
     res.end(text);
   } finally {
     if (semaphore) semaphore.release();
@@ -412,40 +512,74 @@ async function resolveStatic(urlPath) {
   return null;
 }
 
-async function handleStatic(req, res) {
-  const file = await resolveStatic(req.url || "/");
+async function handleStatic(req, res, options = {}) {
+  const requestPath = req.url || "/";
+  const injectToken = configuredToken(options);
+  const file = await resolveStatic(requestPath);
   if (file && typeof file === "object" && file.status === 400) {
-    res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+    res.writeHead(400, withSecurityHeaders({ "content-type": "text/plain; charset=utf-8" }));
     res.end(file.message);
     return;
   }
   if (!file) {
+    let decodedPath = "";
+    try {
+      decodedPath = decodeURIComponent(requestPath.split("?")[0].split("#")[0]);
+    } catch {
+      res.writeHead(400, withSecurityHeaders({ "content-type": "text/plain; charset=utf-8" }));
+      res.end("Bad request");
+      return;
+    }
+    if (extname(decodedPath)) {
+      res.writeHead(404, withSecurityHeaders({ "content-type": "text/plain; charset=utf-8" }));
+      res.end("Not found");
+      return;
+    }
     // SPA-ish fallback: serve the app shell so client routing can take over.
     try {
       const index = await resolveStatic("/");
       if (!index || typeof index !== "string") throw new Error("index not found");
       const buf = await readFile(index);
-      res.writeHead(200, { "content-type": MIME[".html"], ...SECURITY_HEADERS });
-      res.end(buf);
+      // Inject the shared access token (request-time) so a logged-in user gets
+      // the AI features without manually entering an access key.
+      const html = injectAppToken(buf.toString("utf8"), injectToken);
+      // HTML must NOT be heuristically cached by the browser/CDN (no Cache-Control
+      // → browsers guess a TTL and serve a STALE shell, so a deploy's new bundle
+      // refs + the request-time token injection never reach the user; this is what
+      // surfaced the "access-key screen on a logged-in session" report). Hashed
+      // assets under _next/static stay immutable; only the navigation document is
+      // marked always-revalidate.
+      res.writeHead(200, withSecurityHeaders({ "content-type": MIME[".html"], "cache-control": HTML_CACHE_CONTROL }));
+      res.end(html);
     } catch {
-      res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+      res.writeHead(404, withSecurityHeaders({ "content-type": "text/plain; charset=utf-8" }));
       res.end("Not found");
     }
     return;
   }
   try {
     const buf = await readFile(file);
-    const headers = {
-      "content-type": MIME[extname(file)] || "application/octet-stream",
-      ...SECURITY_HEADERS,
-    };
+    const headers = withSecurityHeaders({ "content-type": MIME[extname(file)] || "application/octet-stream" });
     // The service worker must never be cached by the CDN/browser — a stale SW
     // keeps controlling the installed PWA and blocks push-handler updates.
     if (file.endsWith("/sw.js")) headers["cache-control"] = "no-cache, no-store, must-revalidate";
+    // HTML pages (every route serves <route>/index.html): inject the shared
+    // access token at request time so a logged-in user gets the AI features with
+    // no manual key entry. The on-disk export stays token-free (no leak).
+    if (file.endsWith(".html")) {
+      // Always-revalidate the navigation document (see HTML_CACHE_CONTROL): a
+      // stale cached shell is exactly what made a logged-in user see the old
+      // access-key screen and never receive a newly-deployed bundle.
+      headers["cache-control"] = HTML_CACHE_CONTROL;
+      const html = injectAppToken(buf.toString("utf8"), injectToken);
+      res.writeHead(200, headers);
+      res.end(html);
+      return;
+    }
     res.writeHead(200, headers);
     res.end(buf);
   } catch {
-    res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+    res.writeHead(404, withSecurityHeaders({ "content-type": "text/plain; charset=utf-8" }));
     res.end("Not found");
   }
 }
@@ -461,6 +595,7 @@ export function createAppServer(makeProvider = defaultMakeProvider, options = {}
   // production uses the default CodexChatProvider. Shares the same concurrency
   // semaphore + token as the analyze-meal route.
   const makeChatProvider = options.makeChatProvider ?? defaultMakeChatProvider;
+  const makeImageProvider = options.makeImageProvider ?? defaultMakeImageProvider;
   return createServer((req, res) => {
     const url = req.url || "/";
     if (url === "/api/analyze-meal" || url.startsWith("/api/analyze-meal?")) {
@@ -468,6 +603,13 @@ export function createAppServer(makeProvider = defaultMakeProvider, options = {}
         // Last-resort honest failure; never fabricate.
         const mapped = codexErrorResponse(err);
         if (!res.headersSent) sendJson(res, mapped.status, mapped.body);
+        else res.end();
+      });
+      return;
+    }
+    if (url === "/api/generate-meal-image" || url.startsWith("/api/generate-meal-image?")) {
+      handleGenerateMealImageRoute(req, res, makeImageProvider, routeOptions).catch(() => {
+        if (!res.headersSent) sendJson(res, 502, { error: "画像生成に失敗しました。あとで再試行できます。" });
         else res.end();
       });
       return;
@@ -487,9 +629,9 @@ export function createAppServer(makeProvider = defaultMakeProvider, options = {}
       sendJson(res, 404, { error: "Not found" });
       return;
     }
-    handleStatic(req, res).catch(() => {
+    handleStatic(req, res, routeOptions).catch(() => {
       if (!res.headersSent) {
-        res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+        res.writeHead(500, withSecurityHeaders({ "content-type": "text/plain; charset=utf-8" }));
       }
       res.end("Internal error");
     });

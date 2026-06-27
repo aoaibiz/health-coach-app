@@ -10,6 +10,8 @@ import { MealEditor } from "@/components/meal/MealEditor";
 import { useMeals } from "@/components/meal/useMeals";
 import { useProfile } from "@/components/profile/useProfile";
 import { MealIcon, PlusIcon, UserIcon } from "@/components/icons";
+import { generateMealImage } from "@/lib/analyzeMeal";
+import { putPhoto } from "@/lib/photoStore";
 import type { Meal } from "@/lib/types";
 
 export default function MealPage() {
@@ -19,11 +21,35 @@ export default function MealPage() {
 
   // null = closed, "new" = adding, Meal = editing.
   const [editorState, setEditorState] = useState<"new" | Meal | null>(null);
+  const [generatingImageFor, setGeneratingImageFor] = useState<string | null>(null);
 
   function handleSave(meal: Meal) {
     if (editorState === "new") addMeal(meal);
     else updateMeal(meal.id, meal);
     setEditorState(null);
+  }
+
+  // 「食べた」 (AIプランナー 第3陣D, the twin of the workout 完了): flip a PLANNED meal
+  // to eaten so it starts counting toward 摂取/PFC/達成. Reuses the existing updateMeal
+  // (tombstone-safe sync) — we only change the status, leaving the grounded
+  // nutrition/items/recipe untouched.
+  function handleEat(meal: Meal) {
+    updateMeal(meal.id, { status: "eaten" });
+  }
+
+  async function handleGenerateImage(meal: Meal) {
+    if (!meal.text.trim()) return;
+    setGeneratingImageFor(meal.id);
+    try {
+      const blob = await generateMealImage({ text: meal.text });
+      const id = `generated-meal-${meal.id}-${Date.now()}`;
+      await putPhoto(id, blob);
+      updateMeal(meal.id, { generatedImageId: id });
+    } catch {
+      // Keep the meal unchanged; the user can retry from the card.
+    } finally {
+      setGeneratingImageFor(null);
+    }
   }
 
   return (
@@ -34,7 +60,7 @@ export default function MealPage() {
         {profileReady && !profile && (
           <Link
             href="/profile"
-            className="flex items-center gap-3 rounded-2xl border border-accent/30 bg-accent/5 p-3.5 transition active:scale-[0.99] dark:border-accent-light/30 dark:bg-accent-light/10"
+            className="group flex items-center gap-3 rounded-2xl border border-accent/30 bg-accent/5 p-3.5 transition duration-200 ease-spring hover:-translate-y-0.5 hover:border-accent/50 hover:shadow-card active:scale-[0.99] dark:border-accent-light/30 dark:bg-accent-light/10"
           >
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent/15 text-accent dark:text-accent-light">
               <UserIcon className="h-5 w-5" />
@@ -63,6 +89,11 @@ export default function MealPage() {
                 meal={meal}
                 onEdit={() => setEditorState(meal)}
                 onDelete={() => void removeMeal(meal.id)}
+                onEat={
+                  meal.status === "planned" ? () => handleEat(meal) : undefined
+                }
+                onGenerateImage={() => void handleGenerateImage(meal)}
+                generatingImage={generatingImageFor === meal.id}
               />
             ))}
           </div>
@@ -74,9 +105,9 @@ export default function MealPage() {
         type="button"
         onClick={() => setEditorState("new")}
         aria-label="食事を追加"
-        className="fixed bottom-24 right-1/2 z-20 flex h-14 w-14 translate-x-[calc(min(50vw,14rem)-1.5rem)] items-center justify-center rounded-full bg-accent text-white shadow-lg shadow-accent/30 transition active:scale-95 hover:bg-accent-dark"
+        className="group fixed bottom-24 right-1/2 z-20 flex h-14 w-14 translate-x-[calc(min(50vw,14rem)-1.5rem)] items-center justify-center rounded-full bg-gradient-to-br from-accent-light to-accent-dark text-white shadow-glow-accent transition duration-200 ease-spring hover:scale-105 hover:shadow-card-hover active:scale-95"
       >
-        <PlusIcon className="h-7 w-7" />
+        <PlusIcon className="h-7 w-7 transition-transform duration-300 ease-spring group-hover:rotate-90" />
       </button>
 
       {editorState !== null && (
