@@ -417,6 +417,14 @@ async function postImageJson(base, body, raw, token = TEST_TOKEN) {
   });
 }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 describe("Node server - POST /api/generate-meal-image route wiring", () => {
   it("missing/incorrect token -> 401 before body handling", async () => {
     const srv = await startServer(() => new MockProvider(), {
@@ -457,6 +465,103 @@ describe("Node server - POST /api/generate-meal-image route wiring", () => {
       expect(data.mimeType).toBe("image/png");
       expect(data.imageBase64).toBe(Buffer.from("fake-png").toString("base64"));
       expect(data.generatedBy).toBe("fake-image-provider");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("coalesces concurrent same-text image requests into one provider job", async () => {
+    let calls = 0;
+    const started = deferred();
+    const release = deferred();
+    const srv = await startServer(() => new MockProvider(), {
+      maxConcurrency: 1,
+      makeImageProvider: () => ({
+        async generateMealImage(input) {
+          calls += 1;
+          expect(input.text).toBe("鶏むね肉");
+          started.resolve();
+          await release.promise;
+          return {
+            imageBase64: Buffer.from("coalesced-png").toString("base64"),
+            mimeType: "image/png",
+            generatedBy: "fake-image-provider",
+          };
+        },
+      }),
+    });
+    try {
+      const first = postImageJson(srv.base, { text: "鶏むね肉" });
+      await started.promise;
+      const second = postImageJson(srv.base, { text: " 鶏むね肉 " });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(calls).toBe(1);
+      release.resolve();
+
+      const [a, b] = await Promise.all([first, second]);
+      expect(a.status).toBe(200);
+      expect(b.status).toBe(200);
+      expect((await a.json()).imageBase64).toBe(Buffer.from("coalesced-png").toString("base64"));
+      expect((await b.json()).imageBase64).toBe(Buffer.from("coalesced-png").toString("base64"));
+      expect(calls).toBe(1);
+    } finally {
+      release.resolve();
+      await srv.close();
+    }
+  });
+
+  it("serves a completed same-text retry from the short-lived image cache", async () => {
+    let calls = 0;
+    const srv = await startServer(() => new MockProvider(), {
+      makeImageProvider: () => ({
+        async generateMealImage() {
+          calls += 1;
+          return {
+            imageBase64: Buffer.from(`cached-png-${calls}`).toString("base64"),
+            mimeType: "image/png",
+            generatedBy: "fake-image-provider",
+          };
+        },
+      }),
+    });
+    try {
+      const first = await postImageJson(srv.base, { text: "鮭定食" });
+      const second = await postImageJson(srv.base, { text: " 鮭定食 " });
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect((await first.json()).imageBase64).toBe(Buffer.from("cached-png-1").toString("base64"));
+      expect((await second.json()).imageBase64).toBe(Buffer.from("cached-png-1").toString("base64"));
+      expect(calls).toBe(1);
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("does not coalesce different long prompts that only share the first 200 characters", async () => {
+    let calls = 0;
+    const sharedPrefix = "x".repeat(210);
+    const srv = await startServer(() => new MockProvider(), {
+      makeImageProvider: () => ({
+        async generateMealImage(input) {
+          calls += 1;
+          return {
+            imageBase64: Buffer.from(`long-prompt-${input.text.endsWith("A") ? "a" : "b"}`).toString("base64"),
+            mimeType: "image/png",
+            generatedBy: "fake-image-provider",
+          };
+        },
+      }),
+    });
+    try {
+      const first = await postImageJson(srv.base, { text: `${sharedPrefix}A` });
+      const second = await postImageJson(srv.base, { text: `${sharedPrefix}B` });
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect((await first.json()).imageBase64).toBe(Buffer.from("long-prompt-a").toString("base64"));
+      expect((await second.json()).imageBase64).toBe(Buffer.from("long-prompt-b").toString("base64"));
+      expect(calls).toBe(2);
     } finally {
       await srv.close();
     }

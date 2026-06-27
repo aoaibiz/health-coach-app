@@ -30,6 +30,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = join(__dirname, "..", "out");
 const PORT = Number(process.env.PORT) || 8787;
 const DEFAULT_MAX_CONCURRENCY = 2;
+const IMAGE_GENERATION_BUSY = "IMAGE_GENERATION_BUSY";
+const MEAL_IMAGE_JOB_CACHE_TTL_MS = 15 * 60 * 1000;
+const MEAL_IMAGE_JOB_CACHE_MAX_ENTRIES = 12;
 
 /** ~9.5MB → comfortably above the 9MB base64 cap the handler enforces (413). */
 const MAX_BODY_BYTES = 9_500_000;
@@ -160,6 +163,65 @@ function createSemaphore(max) {
     },
     active() {
       return active;
+    },
+  };
+}
+
+function normalizeMealImageJobKey(text) {
+  return text.trim().replace(/\s+/g, " ");
+}
+
+export function createMealImageJobStore(options = {}) {
+  const ttlMs = options.ttlMs ?? MEAL_IMAGE_JOB_CACHE_TTL_MS;
+  const maxEntries = options.maxEntries ?? MEAL_IMAGE_JOB_CACHE_MAX_ENTRIES;
+  const now = options.now ?? (() => Date.now());
+  const cache = new Map();
+  const inFlight = new Map();
+
+  function prune() {
+    const current = now();
+    for (const [key, entry] of cache) {
+      if (entry.expiresAt <= current) cache.delete(key);
+    }
+    while (cache.size > maxEntries) {
+      const oldest = cache.keys().next().value;
+      if (oldest === undefined) break;
+      cache.delete(oldest);
+    }
+  }
+
+  return {
+    run(text, producer) {
+      const key = normalizeMealImageJobKey(text);
+      const current = now();
+      const cached = cache.get(key);
+      if (cached && cached.expiresAt > current) return Promise.resolve(cached.data);
+      if (cached) cache.delete(key);
+
+      const pending = inFlight.get(key);
+      if (pending) return pending;
+
+      const promise = Promise.resolve()
+        .then(producer)
+        .then((data) => {
+          if (maxEntries > 0 && ttlMs > 0) {
+            cache.set(key, { data, expiresAt: now() + ttlMs });
+            prune();
+          }
+          return data;
+        })
+        .finally(() => {
+          if (inFlight.get(key) === promise) inFlight.delete(key);
+        });
+      inFlight.set(key, promise);
+      return promise;
+    },
+    cachedCount() {
+      prune();
+      return cache.size;
+    },
+    pendingCount() {
+      return inFlight.size;
     },
   };
 }
@@ -326,45 +388,52 @@ export async function handleGenerateMealImageRoute(
     sendJson(res, 401, { error: "unauthorized" });
     return;
   }
-  const semaphore = options.semaphore;
-  const acquired = semaphore ? semaphore.acquire() : true;
-  if (!acquired) {
-    sendJson(res, 503, { error: "busy", message: "混み合っています。少し後でお試しください。" });
+
+  let raw;
+  try {
+    raw = await readBody(req);
+  } catch (err) {
+    sendJson(res, err && err.tooLarge ? 413 : 400, { error: err && err.tooLarge ? "リクエストが大きすぎます" : "Invalid request body" });
+    return;
+  }
+  let body;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    sendJson(res, 400, { error: "Invalid request body" });
+    return;
+  }
+  const text = typeof body.text === "string" ? body.text.trim() : "";
+  if (!text) {
+    sendJson(res, 400, { error: "text required" });
     return;
   }
   try {
-    let raw;
-    try {
-      raw = await readBody(req);
-    } catch (err) {
-      sendJson(res, err && err.tooLarge ? 413 : 400, { error: err && err.tooLarge ? "リクエストが大きすぎます" : "Invalid request body" });
-      return;
-    }
-    let body;
-    try {
-      body = JSON.parse(raw);
-    } catch {
-      sendJson(res, 400, { error: "Invalid request body" });
-      return;
-    }
-    const text = typeof body.text === "string" ? body.text.trim() : "";
-    if (!text) {
-      sendJson(res, 400, { error: "text required" });
-      return;
-    }
-    try {
-      const data = await makeProvider().generateMealImage({ text });
-      sendJson(res, 200, data);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg === "CODEX_NOT_FOUND") {
-        sendJson(res, 503, { error: "image_generation_unavailable", message: "画像生成が今使えません。少し後でお試しください。" });
-        return;
+    const semaphore = options.semaphore;
+    const runProvider = async () => {
+      const acquired = semaphore ? semaphore.acquire() : true;
+      if (!acquired) throw new Error(IMAGE_GENERATION_BUSY);
+      try {
+        return await makeProvider().generateMealImage({ text });
+      } finally {
+        if (semaphore) semaphore.release();
       }
-      sendJson(res, 502, { error: "画像生成に失敗しました。あとで再試行できます。" });
+    };
+    const data = options.imageJobs
+      ? await options.imageJobs.run(text, runProvider)
+      : await runProvider();
+    sendJson(res, 200, data);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === IMAGE_GENERATION_BUSY) {
+      sendJson(res, 503, { error: "busy", message: "混み合っています。少し後でお試しください。" });
+      return;
     }
-  } finally {
-    if (semaphore) semaphore.release();
+    if (msg === "CODEX_NOT_FOUND") {
+      sendJson(res, 503, { error: "image_generation_unavailable", message: "画像生成が今使えません。少し後でお試しください。" });
+      return;
+    }
+    sendJson(res, 502, { error: "画像生成に失敗しました。あとで再試行できます。" });
   }
 }
 
@@ -590,7 +659,8 @@ async function handleStatic(req, res, options = {}) {
  */
 export function createAppServer(makeProvider = defaultMakeProvider, options = {}) {
   const semaphore = createSemaphore(configuredMaxConcurrency(options));
-  const routeOptions = { ...options, semaphore };
+  const imageJobs = options.imageJobs ?? createMealImageJobStore(options.imageJobStoreOptions);
+  const routeOptions = { ...options, semaphore, imageJobs };
   // Chat provider factory: injectable via options for tests (MockChatProvider);
   // production uses the default CodexChatProvider. Shares the same concurrency
   // semaphore + token as the analyze-meal route.

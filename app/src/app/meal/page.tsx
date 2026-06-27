@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import { DateSwitcher } from "@/components/DateSwitcher";
@@ -10,8 +10,13 @@ import { MealEditor } from "@/components/meal/MealEditor";
 import { useMeals } from "@/components/meal/useMeals";
 import { useProfile } from "@/components/profile/useProfile";
 import { MealIcon, PlusIcon, UserIcon } from "@/components/icons";
-import { generateMealImage } from "@/lib/analyzeMeal";
+import {
+  generateMealImageOnce,
+  getMealImageGenerationSnapshot,
+  subscribeMealImageGenerationJobs,
+} from "@/lib/mealImageGenerationJob";
 import { putPhoto } from "@/lib/photoStore";
+import { DATA_CHANGED_EVENT } from "@/lib/syncData";
 import type { Meal } from "@/lib/types";
 
 export default function MealPage() {
@@ -21,7 +26,25 @@ export default function MealPage() {
 
   // null = closed, "new" = adding, Meal = editing.
   const [editorState, setEditorState] = useState<"new" | Meal | null>(null);
-  const [generatingImageFor, setGeneratingImageFor] = useState<string | null>(null);
+  const [generatingImageIds, setGeneratingImageIds] = useState<Set<string>>(() => new Set());
+  const generatingImageIdsRef = useRef<Set<string>>(new Set());
+  const mountedRef = useRef(true);
+  useSyncExternalStore(subscribeMealImageGenerationJobs, getMealImageGenerationSnapshot, () => 0);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const setMealImageGenerating = useCallback((mealId: string, generating: boolean) => {
+    const next = new Set(generatingImageIdsRef.current);
+    if (generating) next.add(mealId);
+    else next.delete(mealId);
+    generatingImageIdsRef.current = next;
+    if (mountedRef.current) setGeneratingImageIds(next);
+  }, []);
 
   function handleSave(meal: Meal) {
     if (editorState === "new") addMeal(meal);
@@ -39,16 +62,18 @@ export default function MealPage() {
 
   async function handleGenerateImage(meal: Meal) {
     if (!meal.text.trim()) return;
-    setGeneratingImageFor(meal.id);
+    if (generatingImageIdsRef.current.has(meal.id)) return;
+    setMealImageGenerating(meal.id, true);
     try {
-      const blob = await generateMealImage({ text: meal.text });
+      const blob = await generateMealImageOnce({ text: meal.text });
       const id = `generated-meal-${meal.id}-${Date.now()}`;
       await putPhoto(id, blob);
       updateMeal(meal.id, { generatedImageId: id });
+      window.dispatchEvent(new Event(DATA_CHANGED_EVENT));
     } catch {
       // Keep the meal unchanged; the user can retry from the card.
     } finally {
-      setGeneratingImageFor(null);
+      setMealImageGenerating(meal.id, false);
     }
   }
 
@@ -93,7 +118,7 @@ export default function MealPage() {
                   meal.status === "planned" ? () => handleEat(meal) : undefined
                 }
                 onGenerateImage={() => void handleGenerateImage(meal)}
-                generatingImage={generatingImageFor === meal.id}
+                generatingImage={generatingImageIds.has(meal.id)}
               />
             ))}
           </div>
