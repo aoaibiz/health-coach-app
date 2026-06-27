@@ -98,6 +98,42 @@ describe("resolveRelativeDateKeyForKind — per-block relative date (Major-2 fix
     expect(resolveRelativeDateKeyForKind(msg, "workout", NOW).dateKey).toBe("2026-06-19");
     expect(resolveRelativeDateKeyForKind(msg, "meal", NOW).dateKey).toBe("2026-06-21");
   });
+
+  it("prefers the explicit record-target day over a source day in 'same menu' requests", () => {
+    const msg = "日付変わってしまいましたが、昨日の記録として、一昨日と全く同じメニューをやりましたので記録しといて";
+    expect(resolveRelativeDateKeyForKind(msg, "meal", NOW)).toEqual({
+      dateKey: "2026-06-20",
+      ambiguous: false,
+    });
+  });
+
+  it("does not let an explicit meal target date drag a separately dated workout", () => {
+    const msg = "昨日の記録として夕食、今日の筋トレを記録して";
+    expect(resolveRelativeDateKeyForKind(msg, "meal", NOW)).toEqual({
+      dateKey: "2026-06-20",
+      ambiguous: false,
+    });
+    expect(resolveRelativeDateKeyForKind(msg, "workout", NOW)).toEqual({
+      dateKey: "2026-06-21",
+      ambiguous: false,
+    });
+  });
+
+  it("does not backdate a source-only 'same as yesterday' phrase when no record-target day is named", () => {
+    const msg = "昨日と同じメニューを記録して";
+    expect(resolveRelativeDateKeyForKind(msg, "meal", NOW)).toEqual({
+      dateKey: null,
+      ambiguous: false,
+    });
+  });
+
+  it("still backdates a direct past meal phrase that is not a source comparison", () => {
+    const msg = "昨日の夕食を記録して";
+    expect(resolveRelativeDateKeyForKind(msg, "meal", NOW)).toEqual({
+      dateKey: "2026-06-20",
+      ambiguous: false,
+    });
+  });
 });
 
 describe("backdatedNote", () => {

@@ -22,6 +22,7 @@ import {
   CALENDAR_PLAN_CLOSE,
   TIME_AWARENESS_GUIDE,
   PROFILE_AWARENESS_GUIDE,
+  DELETE_REQUEST_GUIDE,
   COACH_EXPERTISE,
   SYSTEM_GUARDRAILS,
   DEFAULT_COACH_NAME,
@@ -60,6 +61,7 @@ function expectSafetyFloorIntact(prompt: string) {
   }
   expect(prompt).toContain(SYSTEM_GUARDRAILS);
   expect(prompt).toContain(COACH_EXPERTISE);
+  expect(prompt).toContain(DELETE_REQUEST_GUIDE);
   expect(prompt).toContain(EXPERTISE_MARKER);
   expect(prompt).toContain(AUTO_LOG_PROTOCOL);
   expect(prompt).toContain(WORKOUT_LOG_PROTOCOL);
@@ -84,6 +86,15 @@ describe("auto-log protocols COUPLE the prose claim to the block (Task 1 — rec
     const prompt = buildChatPrompt(TURNS);
     expect(prompt).toContain("記録の整合性");
     expect(prompt).toContain("必ずブロックを付けること");
+  });
+});
+
+describe("delete request guide", () => {
+  it("forbids claiming a deletion when the app has not actually deleted anything", () => {
+    expect(DELETE_REQUEST_GUIDE).toContain("できません");
+    expect(DELETE_REQUEST_GUIDE).toContain("削除しました");
+    expect(DELETE_REQUEST_GUIDE).toContain("完了形で言わない");
+    expect(buildChatPrompt(TURNS)).toContain(DELETE_REQUEST_GUIDE);
   });
 });
 

@@ -56,8 +56,8 @@ import { workoutBurn } from "@/lib/burn";
 import { toDateKey, makeId, formatTime, formatNowText } from "@/lib/date";
 import type { LoggedMealTime } from "@/lib/chat";
 import { compressImage } from "@/lib/image";
-import { putPhoto } from "@/lib/photoStore";
-import { DATA_CHANGED_EVENT } from "@/lib/syncData";
+import { deletePhoto, putPhoto } from "@/lib/photoStore";
+import { DATA_CHANGED_EVENT, recordDeletions } from "@/lib/syncData";
 import { parseCoachReply } from "@/lib/mealLogProtocol";
 import { parseWorkoutReply } from "@/lib/workoutLogProtocol";
 import { parseCalendarReply, type CalendarPlanPayload } from "@/lib/calendarPlanProtocol";
@@ -90,6 +90,11 @@ import {
 import { parseSleepReply } from "@/lib/sleepLogProtocol";
 import { applySleepLog } from "@/lib/chatSleepLog";
 import { reconcileLogClaim } from "@/lib/logClaim";
+import {
+  deleteConfirmation,
+  resolveChatDeleteRequest,
+  type ChatDeleteRequest,
+} from "@/lib/chatDeleteIntent";
 import type { Profile } from "@/lib/types";
 
 /**
@@ -259,6 +264,61 @@ function calendarTimeZone(): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function notifyLocalDataChanged(section: "meals" | "workouts"): void {
+  try {
+    window.dispatchEvent(new CustomEvent(DATA_CHANGED_EVENT, { detail: { section } }));
+  } catch {
+    /* a missed same-tab repaint falls back to navigation/focus reload */
+  }
+}
+
+async function deleteMealsFromChat(ids: string[]): Promise<number> {
+  const idSet = new Set(ids);
+  const current = loadMeals();
+  const targets = current.filter((m) => idSet.has(m.id));
+  if (targets.length === 0) return 0;
+
+  const photoIds = new Set<string>();
+  for (const meal of targets) {
+    for (const id of meal.photoIds ?? []) photoIds.add(id);
+    if (meal.photoId) photoIds.add(meal.photoId);
+    if (meal.generatedImageId) photoIds.add(meal.generatedImageId);
+  }
+  for (const photoId of photoIds) {
+    await deletePhoto(photoId).catch(() => undefined);
+  }
+
+  recordDeletions("meals", targets.map((m) => m.id));
+  saveMeals(current.filter((m) => !idSet.has(m.id)));
+  notifyLocalDataChanged("meals");
+  return targets.length;
+}
+
+function deleteWorkoutExercisesFromChat(request: ChatDeleteRequest): number {
+  const current = loadWorkouts();
+  const day = current[request.date];
+  if (!day) return 0;
+  const idSet = new Set(request.ids);
+  const nextExercises = day.exercises.filter((e) => !idSet.has(e.id));
+  const deletedCount = day.exercises.length - nextExercises.length;
+  if (deletedCount <= 0) return 0;
+
+  recordDeletions(
+    "workouts",
+    day.exercises.filter((e) => idSet.has(e.id)).map((e) => e.id),
+  );
+  saveWorkouts({
+    ...current,
+    [request.date]: {
+      ...day,
+      exercises: nextExercises,
+      updatedAt: new Date().toISOString(),
+    },
+  });
+  notifyLocalDataChanged("workouts");
+  return deletedCount;
 }
 
 /**
@@ -552,6 +612,37 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // other's user turn; persist + mirror happen inside appendMessage, NOT inside
         // a setMessages updater.
         const withUser = appendMessage(userMsg);
+
+        // Chat-driven delete (Ao 2026-06-28): if the user explicitly asks to delete
+        // a duplicate/current record, resolve it deterministically against the
+        // persisted chat metadata + local stores, then use the SAME tombstone path
+        // as the meal/workout UI. This prevents the coach from replying "system
+        // cannot delete" while also avoiding broad, ambiguous data loss: without
+        // "全部", a date-only phrase deletes only the latest chat-logged batch.
+        if (!hasPhotos) {
+          const deleteRequest = resolveChatDeleteRequest(trimmed, {
+            messages: withUser,
+            meals: loadMeals(),
+            workouts: loadWorkouts(),
+          });
+          if (deleteRequest) {
+            const deleted =
+              deleteRequest.kind === "meal"
+                ? await deleteMealsFromChat(deleteRequest.ids)
+                : deleteWorkoutExercisesFromChat(deleteRequest);
+            const content =
+              deleted > 0
+                ? deleteConfirmation({ ...deleteRequest, count: deleted })
+                : "該当する記録が見つからなかったため、削除は行いませんでした。日付と種類（食事/運動）を指定してもう一度教えてください。";
+            appendMessage({
+              id: makeId(),
+              role: "assistant",
+              content,
+              createdAt: new Date().toISOString(),
+            });
+            return;
+          }
+        }
 
         // NOTE(2026-06-22 Ao): 「昨日と同じ量」の“LLMを呼ばない決定的ショートカット”は撤去した。
         // コーチは最近の食事文脈(直近数日)を持つので、『昨日と同じで記録』も LLM が会話で意図を

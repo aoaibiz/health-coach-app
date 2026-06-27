@@ -82,7 +82,7 @@ const KIND_KEYWORDS: Record<LogKind, RegExp> = {
  *  overlaps the span of an already-found more-specific one is DROPPED — so 一昨日
  *  (−2) does not also register the 昨日 (−1) it contains (which would mis-attribute
  *  a nearby phrase to yesterday instead of two days ago). */
-function findDayMarkers(t: string): Array<{ index: number; offset: number }> {
+function findDayMarkers(t: string): Array<{ index: number; end: number; offset: number }> {
   const spans: Array<{ start: number; end: number; offset: number }> = [];
   for (const { re, offset } of DAY_MARKERS) {
     // Each DAY_MARKERS regex is non-global; scan all of its matches.
@@ -98,7 +98,7 @@ function findDayMarkers(t: string): Array<{ index: number; offset: number }> {
     }
   }
   return spans
-    .map((s) => ({ index: s.start, offset: s.offset }))
+    .map((s) => ({ index: s.start, end: s.end, offset: s.offset }))
     .sort((a, b) => a.index - b.index);
 }
 
@@ -117,6 +117,42 @@ function findKindIndices(t: string, kind: LogKind): number[] {
 /** The set of DISTINCT day offsets present anywhere in the text. */
 function distinctOffsets(markers: Array<{ offset: number }>): Set<number> {
   return new Set(markers.map((m) => m.offset));
+}
+
+/**
+ * A day word can describe the SOURCE being copied ("一昨日と同じメニュー") rather
+ * than the day to SAVE TO. Those markers must not backdate the new record. We
+ * detect the common adjacent forms:
+ *   - 昨日と同じ / 昨日と一緒 / 昨日同様
+ *   - 昨日のと同じ / 昨日のメニューと同じ
+ * Kept local to the resolver: the full food copy still belongs to the coach /
+ * meal-log block; this only prevents the SAVE DATE from being stolen by the
+ * source date.
+ */
+function isSourceComparisonMarker(
+  t: string,
+  marker: { index: number; end: number },
+): boolean {
+  const after = t.slice(marker.end, marker.end + 18);
+  return /^(?:の)?(?:[^、。,.，．\s]{0,8})?(?:と)?(?:同じ|おなじ|一緒|いっしょ|同様)/.test(after);
+}
+
+/**
+ * Explicit record-target phrases outrank kind proximity:
+ *   - 昨日の記録として / 昨日の分として / 昨日の日付で
+ *   - 昨日として記録 / 昨日に記録
+ *
+ * This is the key distinction for "昨日の記録として、一昨日と同じメニュー": yesterday
+ * is the target day, while two-days-ago is merely the source template.
+ */
+function findExplicitRecordTargetMarkers(
+  t: string,
+  markers: Array<{ index: number; end: number; offset: number }>,
+): Array<{ index: number; end: number; offset: number }> {
+  return markers.filter((m) => {
+    const after = t.slice(m.end, m.end + 16);
+    return /^(?:の)?(?:記録|分|日付)(?:として|で|に)?/.test(after) || /^(?:として|に)記録/.test(after);
+  });
 }
 
 export interface KindDateResolution {
@@ -158,10 +194,24 @@ export function resolveRelativeDateKeyForKind(
   const markers = findDayMarkers(t);
   if (markers.length === 0) return { dateKey: null, ambiguous: false };
 
-  const offsets = distinctOffsets(markers);
+  const resolutionMarkers = markers.filter((m) => !isSourceComparisonMarker(t, m));
+  if (resolutionMarkers.length === 0) return { dateKey: null, ambiguous: false };
+
+  const removedSourceMarker = resolutionMarkers.length !== markers.length;
+  const offsets = distinctOffsets(resolutionMarkers);
+
+  const explicitTargets = findExplicitRecordTargetMarkers(t, resolutionMarkers);
+  if (explicitTargets.length > 0 && offsets.size === 1) {
+    const targetOffsets = distinctOffsets(explicitTargets);
+    if (targetOffsets.size === 1) {
+      const offset = [...targetOffsets][0];
+      return { dateKey: shiftDateKey(todayKey, offset), ambiguous: false };
+    }
+    return { dateKey: null, ambiguous: true };
+  }
   // (2) A single consistent day word governs the whole message — no conflict.
-  if (offsets.size === 1) {
-    return { dateKey: shiftDateKey(todayKey, markers[0].offset), ambiguous: false };
+  if (!removedSourceMarker && offsets.size === 1) {
+    return { dateKey: shiftDateKey(todayKey, resolutionMarkers[0].offset), ambiguous: false };
   }
 
   // (3) Conflicting day words. Attribute to THIS kind by proximity to its keyword.
@@ -178,7 +228,7 @@ export function resolveRelativeDateKeyForKind(
   const chosen = new Set<number>();
   for (const ki of kindIdx) {
     let best: { dist: number; offset: number; preceding: boolean } | null = null;
-    for (const mk of markers) {
+    for (const mk of resolutionMarkers) {
       const preceding = mk.index <= ki;
       const dist = Math.abs(ki - mk.index);
       // Prefer a preceding marker over a following one at equal distance; among the
