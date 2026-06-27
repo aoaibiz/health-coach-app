@@ -21,6 +21,8 @@ export interface AnalyzeInput {
   imageBase64List?: string[];
   /** Free-text description of the meal. */
   text?: string;
+  /** Analysis mode: prepared meal by default, or fridge ingredient identification. */
+  mode?: "meal" | "fridge";
 }
 
 export interface AnalyzeResult {
