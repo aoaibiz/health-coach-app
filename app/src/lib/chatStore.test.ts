@@ -74,12 +74,12 @@ describe("toWireMessages — strip to role+content, keep recent window", () => {
     ]);
   });
 
-  it("sends the full stored conversation window by default", () => {
-    const many = Array.from({ length: 30 }, (_, i) => msg("user", `m${i}`, i));
+  it("sends a bounded recent conversation window by default", () => {
+    const many = Array.from({ length: 50 }, (_, i) => msg("user", `m${i}`, i));
     const wire = toWireMessages(many);
-    expect(wire).toHaveLength(30);
-    expect(wire[0].content).toBe("m0");
-    expect(wire[29].content).toBe("m29");
+    expect(wire).toHaveLength(40);
+    expect(wire[0].content).toBe("m10");
+    expect(wire[39].content).toBe("m49");
   });
 
   it("keeps only the last `limit` turns", () => {
@@ -88,5 +88,10 @@ describe("toWireMessages — strip to role+content, keep recent window", () => {
     expect(wire).toHaveLength(5);
     expect(wire[0].content).toBe("m25");
     expect(wire[4].content).toBe("m29");
+  });
+
+  it("clamps verbose bubbles before sending them to /api/chat", () => {
+    const wire = toWireMessages([msg("user", "x".repeat(2_000), 1)]);
+    expect(wire[0].content).toHaveLength(1_200);
   });
 });

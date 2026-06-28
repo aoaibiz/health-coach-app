@@ -182,6 +182,21 @@ describe("shapeMessages — pure context/history shaping", () => {
     expect(shaped[0].content.length).toBe(4000);
   });
 
+  it("caps the total forwarded transcript so long stored history cannot make chat 502", () => {
+    const many = Array.from({ length: 199 }, (_, i) => ({
+      role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+      content: `old-${i} ` + "x".repeat(4000),
+    }));
+    many.push({ role: "user", content: "今日の分消して！トレーニング！" });
+
+    const shaped = shapeMessages(many);
+    const totalChars = shaped.reduce((sum, m) => sum + m.content.length, 0);
+
+    expect(totalChars).toBeLessThanOrEqual(32_000);
+    expect(shaped.at(-1)).toEqual({ role: "user", content: "今日の分消して！トレーニング！" });
+    expect(shaped.length).toBeLessThan(200);
+  });
+
   it("returns [] for non-array input", () => {
     expect(shapeMessages(undefined)).toEqual([]);
     expect(shapeMessages("nope" as never)).toEqual([]);

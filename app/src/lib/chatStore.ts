@@ -59,6 +59,11 @@ export const CHAT_STORAGE_KEY = "health-app:chat:v1";
 
 /** Cap stored history so localStorage never grows unbounded. */
 const MAX_STORED = 200;
+/** Cap transcript turns sent to the LLM. Full long-term health history is sent via
+ * structured context, not by replaying every old chat bubble. */
+const MAX_WIRE_MESSAGES = 40;
+/** Per-turn wire cap so a pasted/old verbose bubble cannot balloon /api/chat. */
+const MAX_WIRE_CONTENT_CHARS = 1_200;
 
 function isChatMessage(v: unknown): v is ChatMessage {
   if (!v || typeof v !== "object") return false;
@@ -143,9 +148,9 @@ function sameMessageMetadata(a: ChatMessage, b: ChatMessage): boolean {
  */
 export function toWireMessages(
   messages: ChatMessage[],
-  limit = MAX_STORED,
+  limit = MAX_WIRE_MESSAGES,
 ): Array<{ role: ChatRole; content: string }> {
   return messages
     .slice(-limit)
-    .map((m) => ({ role: m.role, content: m.content }));
+    .map((m) => ({ role: m.role, content: m.content.slice(0, MAX_WIRE_CONTENT_CHARS) }));
 }

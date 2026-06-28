@@ -46,6 +46,9 @@ import {
 const MAX_MESSAGES = 200;
 /** Cap a single message length (defensive against giant pasted payloads). */
 const MAX_CONTENT_CHARS = 4_000;
+/** Cap the whole forwarded transcript. Long-term health history travels through
+ * structured summaries; replaying a huge chat transcript can make the CLI fail. */
+const MAX_TOTAL_CONTENT_CHARS = 32_000;
 
 // --- Untrusted-context sanitisation (defense-in-depth) ----------------------
 // Every context field is CLIENT-supplied. Even though our own client populates
@@ -176,7 +179,33 @@ export function shapeMessages(
     if (!trimmed) continue;
     cleaned.push({ role, content: trimmed.slice(0, MAX_CONTENT_CHARS) });
   }
-  return cleaned.slice(-MAX_MESSAGES);
+  return fitMessagesToBudget(cleaned.slice(-MAX_MESSAGES));
+}
+
+function fitMessagesToBudget(messages: ChatTurn[]): ChatTurn[] {
+  const out: ChatTurn[] = [];
+  let total = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    const remaining = MAX_TOTAL_CONTENT_CHARS - total;
+    if (remaining <= 0) break;
+
+    if (m.content.length <= remaining) {
+      out.push(m);
+      total += m.content.length;
+      continue;
+    }
+
+    // The newest turn must survive. Older over-budget turns are dropped rather
+    // than partially replayed, because structured context already carries health
+    // history and a clipped old bubble is easy for the model to over-read.
+    if (out.length === 0) {
+      out.push({ ...m, content: m.content.slice(0, remaining) });
+      total += remaining;
+    }
+    break;
+  }
+  return out.reverse();
 }
 
 /**
