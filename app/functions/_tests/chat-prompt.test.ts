@@ -20,6 +20,8 @@ import {
   CALENDAR_PLAN_PROTOCOL,
   CALENDAR_PLAN_OPEN,
   CALENDAR_PLAN_CLOSE,
+  DELETE_RECORD_OPEN,
+  DELETE_RECORD_CLOSE,
   TIME_AWARENESS_GUIDE,
   PROFILE_AWARENESS_GUIDE,
   DELETE_REQUEST_GUIDE,
@@ -93,8 +95,23 @@ describe("delete request guide", () => {
   it("forbids claiming a deletion when the app has not actually deleted anything", () => {
     expect(DELETE_REQUEST_GUIDE).toContain("できません");
     expect(DELETE_REQUEST_GUIDE).toContain("削除しました");
-    expect(DELETE_REQUEST_GUIDE).toContain("完了形で言わない");
+    expect(DELETE_REQUEST_GUIDE).toContain("完了形で断言しない");
+    expect(DELETE_REQUEST_GUIDE).toContain("内部の仕組みや実装名は本文に出さない");
+    expect(DELETE_REQUEST_GUIDE).not.toContain("削除ブロック");
     expect(buildChatPrompt(TURNS)).toContain(DELETE_REQUEST_GUIDE);
+  });
+
+  it("lets the model choose a structured delete action from conversation context", () => {
+    expect(DELETE_REQUEST_GUIDE).toContain(DELETE_RECORD_OPEN);
+    expect(DELETE_REQUEST_GUIDE).toContain(DELETE_RECORD_CLOSE);
+    expect(DELETE_REQUEST_GUIDE).toContain('"kind":"meal|workout"');
+    expect(DELETE_REQUEST_GUIDE).toContain('"scope":"latest|day"');
+    expect(DELETE_REQUEST_GUIDE).toContain("文脈を読めるパーソナルトレーナー");
+  });
+
+  it("the final instruction lists the delete block as an allowed appendix", () => {
+    const prompt = buildChatPrompt(TURNS);
+    expect(prompt).toContain("記録削除は «HEALTH_DELETE_RECORD»…«/HEALTH_DELETE_RECORD»");
   });
 });
 

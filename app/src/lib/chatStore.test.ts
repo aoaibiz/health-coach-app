@@ -25,6 +25,14 @@ describe("sameChatHistory — live-restore no-op guard", () => {
     expect(sameChatHistory([msg("user", "hi", 1)], [msg("user", "hi", 9)])).toBe(false);
     expect(sameChatHistory([msg("user", "hi", 1)], [msg("user", "bye", 1)])).toBe(false);
   });
+  it("false when behavior metadata differs even if the visible bubble is the same", () => {
+    const visibleOnly = msg("assistant", "食事に記録しました。", 1);
+    const withLog = {
+      ...visibleOnly,
+      loggedMeal: { mealId: "meal-1", itemCount: 2 },
+    };
+    expect(sameChatHistory([visibleOnly], [withLog])).toBe(false);
+  });
   it("true for two empty histories", () => {
     expect(sameChatHistory([], [])).toBe(true);
   });
@@ -64,6 +72,14 @@ describe("toWireMessages — strip to role+content, keep recent window", () => {
       { role: "user", content: "a" },
       { role: "assistant", content: "b" },
     ]);
+  });
+
+  it("sends the full stored conversation window by default", () => {
+    const many = Array.from({ length: 30 }, (_, i) => msg("user", `m${i}`, i));
+    const wire = toWireMessages(many);
+    expect(wire).toHaveLength(30);
+    expect(wire[0].content).toBe("m0");
+    expect(wire[29].content).toBe("m29");
   });
 
   it("keeps only the last `limit` turns", () => {

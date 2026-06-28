@@ -1,5 +1,9 @@
 import { shiftDateKey, toDateKey } from "./date";
 import type { ChatMessage } from "./chatStore";
+import {
+  parseDeleteRecordReply,
+  type DeleteRecordPayload,
+} from "./deleteRecordProtocol";
 import type { Meal, Workout } from "./types";
 
 export type ChatDeleteKind = "meal" | "workout";
@@ -11,6 +15,12 @@ export interface ChatDeleteRequest {
   date: string;
   ids: string[];
   count: number;
+}
+
+export interface ResolvedCoachDeleteReply {
+  display: string;
+  request: ChatDeleteRequest | null;
+  handled: boolean;
 }
 
 interface LatestLoggedAction {
@@ -35,6 +45,7 @@ const LATEST_RECORD_FALLBACK_RE = /記録|重複|直近|最新|最後|今の|こ
 const MEAL_RE = /食事|ごはん|ご飯|朝食|昼食|夕食|夜食|間食|おやつ|メニュー|献立|食べ|飲み|飲ん/;
 const WORKOUT_RE =
   /筋トレ|運動|トレーニング|ワークアウト|種目|セット|レップ|ベンチ|スクワット|デッドリフト|腹筋|腕立て|懸垂|ランニング|ジョギング|ウォーキング|有酸素/;
+const GENERIC_WORKOUT_RE = /筋トレ|運動|トレーニング|ワークアウト|種目/;
 
 const DAY_MARKERS: Array<{ re: RegExp; offset: number }> = [
   { re: /一昨昨日|一昨々日|さきおととい/, offset: -3 },
@@ -84,6 +95,23 @@ function latestLoggedAction(
   return null;
 }
 
+function latestAssistantDeletionContext(messages: ReadonlyArray<ChatMessage>): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+    const content = msg.content ?? "";
+    if (
+      /(削除対象|削除してください|消してください|消す対象|対象は)/.test(content) &&
+      hasDayMarker(content) &&
+      (MEAL_RE.test(content) || WORKOUT_RE.test(content))
+    ) {
+      return content;
+    }
+    return null;
+  }
+  return null;
+}
+
 function requestedKind(text: string, latest: LatestLoggedAction | null): ChatDeleteKind | null {
   const explicit = explicitlyRequestedKind(text);
   if (explicit) return explicit;
@@ -124,6 +152,137 @@ function workoutIdsOnDate(
   return ids.filter((id) => present.has(id));
 }
 
+function allWorkoutIdsOnDate(workouts: Record<string, Workout>, date: string): string[] {
+  return (workouts[date]?.exercises ?? []).map((e) => e.id).filter(Boolean);
+}
+
+function normalizeName(s: string): string {
+  return s.replace(/\s+/g, "").toLowerCase();
+}
+
+function matchingMealIdsByName(meals: Meal[], date: string, names: ReadonlyArray<string>): string[] {
+  const needles = names.map(normalizeName).filter(Boolean);
+  if (needles.length === 0) return [];
+  return meals
+    .filter((m) => m.date === date)
+    .filter((m) => {
+      const haystack = normalizeName(`${m.type} ${m.text}`);
+      return needles.some((name) => haystack.includes(name));
+    })
+    .map((m) => m.id);
+}
+
+function matchingWorkoutIdsByName(
+  workouts: Record<string, Workout>,
+  date: string,
+  names: ReadonlyArray<string>,
+): string[] {
+  const needles = names.map(normalizeName).filter(Boolean);
+  if (needles.length === 0) return [];
+  return (workouts[date]?.exercises ?? [])
+    .filter((e) => {
+      const haystack = normalizeName(e.name);
+      return needles.some((name) => haystack.includes(name) || name.includes(haystack));
+    })
+    .map((e) => e.id)
+    .filter(Boolean);
+}
+
+export function resolveDeleteRecordAction(
+  payload: DeleteRecordPayload,
+  opts: {
+    messages: ReadonlyArray<ChatMessage>;
+    meals: Meal[];
+    workouts: Record<string, Workout>;
+  },
+): ChatDeleteRequest | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(payload.date)) return null;
+  const names = payload.names ?? [];
+
+  if (payload.kind === "meal") {
+    const byName = matchingMealIdsByName(opts.meals, payload.date, names);
+    if (byName.length > 0) {
+      return {
+        kind: "meal",
+        scope: byName.length > 1 ? "date" : "last",
+        date: payload.date,
+        ids: byName,
+        count: byName.length,
+      };
+    }
+    if (names.length > 0) return null;
+    if (payload.scope === "day") {
+      const ids = opts.meals.filter((m) => m.date === payload.date).map((m) => m.id);
+      return ids.length > 0
+        ? { kind: "meal", scope: "date", date: payload.date, ids, count: ids.length }
+        : null;
+    }
+    const latestId = latestLoggedAction(opts.messages, "meal")?.ids.find(
+      (id) => mealDate(opts.meals, id) === payload.date,
+    );
+    return latestId
+      ? { kind: "meal", scope: "last", date: payload.date, ids: [latestId], count: 1 }
+      : null;
+  }
+
+  const byName = matchingWorkoutIdsByName(opts.workouts, payload.date, names);
+  if (byName.length > 0) {
+    return {
+      kind: "workout",
+      scope: byName.length > 1 ? "date" : "last",
+      date: payload.date,
+      ids: byName,
+      count: byName.length,
+    };
+  }
+  if (names.length > 0) return null;
+  if (payload.scope === "day") {
+    const ids = allWorkoutIdsOnDate(opts.workouts, payload.date);
+    return ids.length > 0
+      ? { kind: "workout", scope: "date", date: payload.date, ids, count: ids.length }
+      : null;
+  }
+  const latest = latestLoggedAction(opts.messages, "workout");
+  const ids = latest?.date === payload.date ? workoutIdsOnDate(opts.workouts, payload.date, latest.ids) : [];
+  return ids.length > 0
+    ? { kind: "workout", scope: "last", date: payload.date, ids, count: ids.length }
+    : null;
+}
+
+export function resolveDeleteRequestFromCoachReply(
+  rawReply: string,
+  fallbackText: string,
+  opts: {
+    messages: ReadonlyArray<ChatMessage>;
+    meals: Meal[];
+    workouts: Record<string, Workout>;
+    now?: Date;
+  },
+): ResolvedCoachDeleteReply {
+  const { display, payload, hadBlock } = parseDeleteRecordReply(rawReply);
+  const structuredRequest = payload
+    ? resolveDeleteRecordAction(payload, {
+        messages: opts.messages,
+        meals: opts.meals,
+        workouts: opts.workouts,
+      })
+    : null;
+  const fallbackRequest = !hadBlock
+    ? resolveChatDeleteRequest(fallbackText, {
+        messages: opts.messages,
+        meals: opts.meals,
+        workouts: opts.workouts,
+        now: opts.now,
+      })
+    : null;
+
+  return {
+    display,
+    request: structuredRequest ?? fallbackRequest,
+    handled: hadBlock || Boolean(fallbackRequest),
+  };
+}
+
 export function resolveChatDeleteRequest(
   text: string,
   opts: {
@@ -138,19 +297,25 @@ export function resolveChatDeleteRequest(
   if (DELETE_QUESTION_RE.test(t)) return null;
   if (!DELETE_INSTRUCTION_RE.test(t)) return null;
 
+  const assistantContext = latestAssistantDeletionContext(opts.messages);
+  const resolutionText =
+    assistantContext && (!explicitlyRequestedKind(t) || !hasDayMarker(t))
+      ? `${t}\n${assistantContext}`
+      : t;
   const now = opts.now ?? new Date();
-  const resolvedDate = resolveDeleteDate(t, now);
+  const resolvedDate = resolveDeleteDate(resolutionText, now);
   if (resolvedDate.ambiguous) return null;
   const targetDate = resolvedDate.dateKey;
   const latestAny = latestLoggedAction(opts.messages);
-  const kind = requestedKind(t, latestAny);
+  const kind = requestedKind(resolutionText, latestAny);
   if (!kind) return null;
   const latest = latestLoggedAction(opts.messages, kind);
+  const explicitKind = explicitlyRequestedKind(resolutionText);
 
   if (NEGATED_ALL_RE.test(t)) return null;
   const wantsAll = ALL_RE.test(t);
   if (wantsAll) {
-    if (!explicitlyRequestedKind(t)) return null;
+    if (!explicitKind) return null;
     if (!targetDate) return null;
     if (kind === "meal") {
       const ids = opts.meals.filter((m) => m.date === targetDate).map((m) => m.id);
@@ -162,6 +327,23 @@ export function resolveChatDeleteRequest(
     return ids.length > 0
       ? { kind, scope: "date", date: targetDate, ids, count: ids.length }
       : null;
+  }
+
+  if (
+    kind === "workout" &&
+    explicitKind === "workout" &&
+    targetDate &&
+    !LATEST_RECORD_FALLBACK_RE.test(t) &&
+    GENERIC_WORKOUT_RE.test(resolutionText)
+  ) {
+    const ids = allWorkoutIdsOnDate(opts.workouts, targetDate);
+    return ids.length > 0
+      ? { kind, scope: "date", date: targetDate, ids, count: ids.length }
+      : null;
+  }
+
+  if (kind === "workout" && explicitKind === "workout" && targetDate && !GENERIC_WORKOUT_RE.test(resolutionText)) {
+    return null;
   }
 
   if (!latest || latest.kind !== kind) return null;

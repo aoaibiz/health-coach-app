@@ -155,15 +155,26 @@ describe("shapeMessages — pure context/history shaping", () => {
     ]);
   });
 
-  it("keeps only the last 20 turns", () => {
+  it("keeps the full stored 200-turn window", () => {
     const many = Array.from({ length: 30 }, (_, i) => ({
       role: "user" as const,
       content: `m${i}`,
     }));
     const shaped = shapeMessages(many);
-    expect(shaped).toHaveLength(20);
-    expect(shaped[0].content).toBe("m10");
-    expect(shaped[19].content).toBe("m29");
+    expect(shaped).toHaveLength(30);
+    expect(shaped[0].content).toBe("m0");
+    expect(shaped[29].content).toBe("m29");
+  });
+
+  it("caps very long histories at the most recent 200 turns", () => {
+    const many = Array.from({ length: 230 }, (_, i) => ({
+      role: "user" as const,
+      content: `m${i}`,
+    }));
+    const shaped = shapeMessages(many);
+    expect(shaped).toHaveLength(200);
+    expect(shaped[0].content).toBe("m30");
+    expect(shaped[199].content).toBe("m229");
   });
 
   it("clamps an over-long message", () => {

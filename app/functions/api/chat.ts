@@ -43,7 +43,7 @@ import {
 } from "../_llm/chat-prompt";
 
 /** Cap the number of turns we forward (keep the prompt small + bounded cost). */
-const MAX_MESSAGES = 20;
+const MAX_MESSAGES = 200;
 /** Cap a single message length (defensive against giant pasted payloads). */
 const MAX_CONTENT_CHARS = 4_000;
 

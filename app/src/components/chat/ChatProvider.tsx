@@ -92,7 +92,7 @@ import { applySleepLog } from "@/lib/chatSleepLog";
 import { reconcileLogClaim } from "@/lib/logClaim";
 import {
   deleteConfirmation,
-  resolveChatDeleteRequest,
+  resolveDeleteRequestFromCoachReply,
   type ChatDeleteRequest,
 } from "@/lib/chatDeleteIntent";
 import type { Profile } from "@/lib/types";
@@ -513,6 +513,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       // sends are supported (the input stays unlocked).
       if (!trimmed && photoList.length === 0) return;
       setError(null);
+      const sentAt = new Date();
 
       // ---- 1. Photo(s) (optional): compress + store all, analyse as ONE meal -
       // Each photo is stored in IndexedDB so the user's bubble + the logged meal
@@ -604,7 +605,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           id: makeId(),
           role: "user",
           content: displayText,
-          createdAt: new Date().toISOString(),
+          createdAt: sentAt.toISOString(),
           ...(photoId ? { photoId } : {}),
           ...(photoIds.length > 1 ? { photoIds } : {}),
         };
@@ -612,37 +613,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // other's user turn; persist + mirror happen inside appendMessage, NOT inside
         // a setMessages updater.
         const withUser = appendMessage(userMsg);
-
-        // Chat-driven delete (Ao 2026-06-28): if the user explicitly asks to delete
-        // a duplicate/current record, resolve it deterministically against the
-        // persisted chat metadata + local stores, then use the SAME tombstone path
-        // as the meal/workout UI. This prevents the coach from replying "system
-        // cannot delete" while also avoiding broad, ambiguous data loss: without
-        // "全部", a date-only phrase deletes only the latest chat-logged batch.
-        if (!hasPhotos) {
-          const deleteRequest = resolveChatDeleteRequest(trimmed, {
-            messages: withUser,
-            meals: loadMeals(),
-            workouts: loadWorkouts(),
-          });
-          if (deleteRequest) {
-            const deleted =
-              deleteRequest.kind === "meal"
-                ? await deleteMealsFromChat(deleteRequest.ids)
-                : deleteWorkoutExercisesFromChat(deleteRequest);
-            const content =
-              deleted > 0
-                ? deleteConfirmation({ ...deleteRequest, count: deleted })
-                : "該当する記録が見つからなかったため、削除は行いませんでした。日付と種類（食事/運動）を指定してもう一度教えてください。";
-            appendMessage({
-              id: makeId(),
-              role: "assistant",
-              content,
-              createdAt: new Date().toISOString(),
-            });
-            return;
-          }
-        }
 
         // NOTE(2026-06-22 Ao): 「昨日と同じ量」の“LLMを呼ばない決定的ショートカット”は撤去した。
         // コーチは最近の食事文脈(直近数日)を持つので、『昨日と同じで記録』も LLM が会話で意図を
@@ -721,7 +691,38 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // Strip the CALENDAR_PLAN block LAST (chat→Googleカレンダー). Like the log
         // blocks, the sentinel is always removed from what the user sees; the
         // structured plan is forwarded to the calendar API below.
-        const { display, payload: calendarPayload } = parseCalendarReply(afterSleep);
+        const { display: afterCalendar, payload: calendarPayload } = parseCalendarReply(afterSleep);
+        // Strip the DELETE_RECORD action last. The coach decides from natural
+        // language + full chat context; the app validates against local data and
+        // only then performs the actual delete through the same tombstone path as
+        // the UI. The action block itself is never shown to the user.
+        const deleteResult = resolveDeleteRequestFromCoachReply(afterCalendar, trimmed, {
+          messages: withUser,
+          meals: loadMeals(),
+          workouts: loadWorkouts(),
+          now: sentAt,
+        });
+        const { display } = deleteResult;
+        const deleteRequest = deleteResult.request;
+
+        if (deleteResult.handled) {
+          const deleted = deleteRequest
+            ? deleteRequest.kind === "meal"
+              ? await deleteMealsFromChat(deleteRequest.ids)
+              : deleteWorkoutExercisesFromChat(deleteRequest)
+            : 0;
+          const content =
+            deleteRequest && deleted > 0
+              ? deleteConfirmation({ ...deleteRequest, count: deleted })
+              : "該当する記録が見つからなかったため、削除は行いませんでした。日付と種類（食事/運動）を指定してもう一度教えてください。";
+          appendMessage({
+            id: makeId(),
+            role: "assistant",
+            content,
+            createdAt: new Date().toISOString(),
+          });
+          return;
+        }
 
         // ---- 3. Auto-log (the critical part): re-ground + write -------------
         // The LOGGED numbers come from the grounded pipelines (meal: foodGrounding;
@@ -888,7 +889,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           Boolean(plannedWorkout) ||
           Boolean(plannedMeal) ||
           loggedSleep;
-        const baseProse = display || rawReply;
+        const baseProse =
+          display.trim() ||
+          "内容を確認しました。対象が分からない場合は、日付・種類・範囲を指定してもう一度教えてください。";
         let honestProse = reconcileLogClaim(baseProse, recorded);
         // Feature ②: when a record actually landed on a PAST day, append an honest
         // note per backdated day so the user can see it wasn't logged to today. With

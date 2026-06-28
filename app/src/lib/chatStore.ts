@@ -110,19 +110,31 @@ export function clearChat(): void {
 }
 
 /**
- * Cheap equality for two chat histories — same length AND same (id, content)
- * pairwise. id+content is enough to tell "the persisted history is what we're
- * already showing" from "the server merge added/changed turns", without a deep
- * compare. Used by ChatProvider's live-restore so re-reading after a login merge
- * is a NO-OP when the conversation hasn't actually changed (no duplicate render,
- * no clobber of an in-flight turn). Pure + testable.
+ * Cheap equality for two chat histories — same length AND same visible content
+ * plus behavior metadata pairwise. The metadata drives later corrections/deletes
+ * ("今の食事消して"), so a restored history with the same bubbles but newer
+ * loggedMeal/loggedWorkout ids must still replace the in-memory copy.
  */
 export function sameChatHistory(a: ChatMessage[], b: ChatMessage[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
     if (a[i].id !== b[i].id || a[i].content !== b[i].content) return false;
+    if (!sameMessageMetadata(a[i], b[i])) return false;
   }
   return true;
+}
+
+function sameJson(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+}
+
+function sameMessageMetadata(a: ChatMessage, b: ChatMessage): boolean {
+  return (
+    sameJson(a.loggedMeal, b.loggedMeal) &&
+    sameJson(a.loggedWorkout, b.loggedWorkout) &&
+    sameJson(a.plannedWorkout, b.plannedWorkout) &&
+    sameJson(a.plannedMeal, b.plannedMeal)
+  );
 }
 
 /**
@@ -131,7 +143,7 @@ export function sameChatHistory(a: ChatMessage[], b: ChatMessage[]): boolean {
  */
 export function toWireMessages(
   messages: ChatMessage[],
-  limit = 20,
+  limit = MAX_STORED,
 ): Array<{ role: ChatRole; content: string }> {
   return messages
     .slice(-limit)

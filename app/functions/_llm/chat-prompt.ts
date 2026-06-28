@@ -73,6 +73,12 @@ export const SLEEP_LOG_CLOSE = "«/SLEEP_LOG»";
 export const CALENDAR_PLAN_OPEN = "«CALENDAR_PLAN»";
 export const CALENDAR_PLAN_CLOSE = "«/CALENDAR_PLAN»";
 
+/** Sentinel that fences a structured delete action. The model decides from the
+ *  user's natural Japanese + transcript; the client validates against local data
+ *  and performs the actual delete. */
+export const DELETE_RECORD_OPEN = "«HEALTH_DELETE_RECORD»";
+export const DELETE_RECORD_CLOSE = "«/HEALTH_DELETE_RECORD»";
+
 /**
  * One grounded line item from the photo analysis (the EXISTING /api/analyze-meal
  * pipeline), handed to the chat so the coach can present it and rally. These are
@@ -613,9 +619,12 @@ export const SYSTEM_GUARDRAILS = [
 
 export const DELETE_REQUEST_GUIDE = [
   "【記録削除依頼の扱い】",
-  "ユーザーが「重複したから消して」「今日の分を削除して」など記録削除を頼んだ場合、アプリ側が安全に特定できた直近のチャット記録は自動削除します。",
-  "あなたの返信まで届いた削除依頼は、まだアプリ側で対象を安全に特定できていない可能性があります。その場合は「できません」と断定せず、日付（今日/昨日など）・種類（食事/運動）・対象（直近/全部/どのメニューか）を1つだけ確認してください。",
-  "削除ブロックはありません。実際に削除できていないのに「削除しました」「消しました」と完了形で言わないこと。",
+  "あなたは文脈を読めるパーソナルトレーナーです。ユーザーが自然な日本語で「今日の運動消しといて」「重複してるから今の食事消して」「お前が消せよ」のように記録削除を頼んだら、直近の会話・今日のデータ・最近の履歴を読んで、削除対象を判断してください。",
+  "削除対象が日付・種類・範囲まで十分に分かるときは、本文は短く自然にし、最後に次の形式の JSON を1つだけ付けてください:",
+  `${DELETE_RECORD_OPEN}{"kind":"meal|workout","date":"YYYY-MM-DD","scope":"latest|day","names":["<対象名 任意>"]}${DELETE_RECORD_CLOSE}`,
+  "kind は食事なら meal、運動/筋トレなら workout。date は現在日時と会話から判断した対象日を YYYY-MM-DD で書く（今日/昨日/一昨日などは必ず日付に直す）。scope は「今日の運動」「昨日の食事全部」のようにその日の対象全体なら day、「今の」「直近」「重複してるやつ」など特定の直近1件なら latest。names は「懸垂だけ」「昼食だけ」のように対象名が分かるときだけ入れる。",
+  "対象がまだ曖昧なときだけ、日付・種類・範囲のうち不足している1点を短く確認してください。「できません」と断定しないこと。",
+  "内部の仕組みや実装名は本文に出さないこと。実際の削除完了文はアプリ側が出すので、削除を実行していない本文だけで「削除しました」「消しました」と完了形で断言しないこと。",
 ].join("\n");
 
 function fmtKcal(n: number): string {
@@ -1547,7 +1556,7 @@ export function buildChatPrompt(messages: ChatTurn[], ctx?: ChatContext): string
     formatTranscript(messages, coachName),
     "",
     `上記の会話に続けて、${coachName}として次の返信を1つだけ、自然な日本語のふつうの文章で書いてください。`,
-    `本文は自然な文章にし、箇条書きや JSON の体裁にはしないでください。ただし記録できる段階になったときだけ、本文の最後に食事は ${MEAL_LOG_OPEN}…${MEAL_LOG_CLOSE}、筋トレ・運動の記録は ${WORKOUT_LOG_OPEN}…${WORKOUT_LOG_CLOSE}、これからやる運動メニューの提案は ${WORKOUT_PLAN_OPEN}…${WORKOUT_PLAN_CLOSE}、これから食べる献立の提案は ${MEAL_PLAN_OPEN}…${MEAL_PLAN_CLOSE}、睡眠は ${SLEEP_LOG_OPEN}…${SLEEP_LOG_CLOSE}、Googleカレンダーへの予定登録は ${CALENDAR_PLAN_OPEN}…${CALENDAR_PLAN_CLOSE} のブロックを付けてよい（上記ルール参照）。それ以外の余計な体裁は不要です。`,
+    `本文は自然な文章にし、箇条書きや JSON の体裁にはしないでください。ただし記録できる段階になったときだけ、本文の最後に食事は ${MEAL_LOG_OPEN}…${MEAL_LOG_CLOSE}、筋トレ・運動の記録は ${WORKOUT_LOG_OPEN}…${WORKOUT_LOG_CLOSE}、これからやる運動メニューの提案は ${WORKOUT_PLAN_OPEN}…${WORKOUT_PLAN_CLOSE}、これから食べる献立の提案は ${MEAL_PLAN_OPEN}…${MEAL_PLAN_CLOSE}、睡眠は ${SLEEP_LOG_OPEN}…${SLEEP_LOG_CLOSE}、Googleカレンダーへの予定登録は ${CALENDAR_PLAN_OPEN}…${CALENDAR_PLAN_CLOSE}、記録削除は ${DELETE_RECORD_OPEN}…${DELETE_RECORD_CLOSE} のブロックを付けてよい（上記ルール参照）。それ以外の余計な体裁は不要です。`,
   );
   return parts.join("\n");
 }

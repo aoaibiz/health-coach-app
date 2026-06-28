@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   deleteConfirmation,
   resolveChatDeleteRequest,
+  resolveDeleteRequestFromCoachReply,
+  resolveDeleteRecordAction,
 } from "./chatDeleteIntent";
+import {
+  DELETE_RECORD_CLOSE,
+  DELETE_RECORD_OPEN,
+} from "./deleteRecordProtocol";
 import type { ChatMessage } from "./chatStore";
 import type { Meal, Workout } from "./types";
 
@@ -247,6 +253,114 @@ describe("resolveChatDeleteRequest", () => {
     });
   });
 
+  it("deletes today's explicit workout request even without chat log metadata", () => {
+    const workouts: Record<string, Workout> = {
+      "2026-06-28": {
+        date: "2026-06-28",
+        updatedAt: "2026-06-28T01:31:00.000Z",
+        exercises: [
+          { id: "hang", name: "懸垂", sets: 3, reps: 5, weight: 0 },
+          { id: "squat", name: "ブルガリアンスクワット", sets: 3, reps: 10, weight: 0 },
+        ],
+      },
+    };
+
+    const request = resolveChatDeleteRequest("今日の運動消しといて！", {
+      messages: [],
+      meals: [],
+      workouts,
+      now: NOW,
+    });
+
+    expect(request).toEqual({
+      kind: "workout",
+      scope: "date",
+      date: "2026-06-28",
+      ids: ["hang", "squat"],
+      count: 2,
+    });
+  });
+
+  it("does not broaden a named exercise natural-language delete into a whole-day workout delete", () => {
+    const workouts: Record<string, Workout> = {
+      "2026-06-28": {
+        date: "2026-06-28",
+        updatedAt: "2026-06-28T01:31:00.000Z",
+        exercises: [
+          { id: "hang", name: "懸垂", sets: 3, reps: 5, weight: 0 },
+          { id: "squat", name: "ブルガリアンスクワット", sets: 3, reps: 10, weight: 0 },
+        ],
+      },
+    };
+
+    const request = resolveChatDeleteRequest("今日の懸垂だけ消して", {
+      messages: [],
+      meals: [],
+      workouts,
+      now: NOW,
+    });
+
+    expect(request).toBeNull();
+  });
+
+  it("does not turn a named exercise natural-language delete into the latest workout batch", () => {
+    const workouts: Record<string, Workout> = {
+      "2026-06-28": {
+        date: "2026-06-28",
+        updatedAt: "2026-06-28T01:31:00.000Z",
+        exercises: [
+          { id: "hang", name: "懸垂", sets: 3, reps: 5, weight: 0 },
+          { id: "squat", name: "ブルガリアンスクワット", sets: 3, reps: 10, weight: 0 },
+        ],
+      },
+    };
+
+    const request = resolveChatDeleteRequest("今日の懸垂だけ消して", {
+      messages: [assistantLoggedWorkout("2026-06-28", ["squat"])],
+      meals: [],
+      workouts,
+      now: NOW,
+    });
+
+    expect(request).toBeNull();
+  });
+
+  it("uses the previous assistant deletion target when the user says to do it", () => {
+    const workouts: Record<string, Workout> = {
+      "2026-06-28": {
+        date: "2026-06-28",
+        updatedAt: "2026-06-28T01:31:00.000Z",
+        exercises: [
+          { id: "hang", name: "懸垂", sets: 3, reps: 5, weight: 0 },
+          { id: "squat", name: "ブルガリアンスクワット", sets: 3, reps: 10, weight: 0 },
+        ],
+      },
+    };
+    const messages: ChatMessage[] = [
+      {
+        id: "assistant-delete-target",
+        role: "assistant",
+        content: "削除対象は「今日の運動」、つまり今日 01:31 に入っている筋トレ記録です。",
+        createdAt: "2026-06-28T01:32:00.000Z",
+      },
+    ];
+
+    const request = resolveChatDeleteRequest("お前が消せよ", {
+      messages,
+      meals: [],
+      workouts,
+      now: NOW,
+    });
+
+    expect(request).toEqual({
+      kind: "workout",
+      scope: "date",
+      date: "2026-06-28",
+      ids: ["hang", "squat"],
+      count: 2,
+    });
+  });
+
   it("ignores a delete-ish question that is not an instruction", () => {
     const request = resolveChatDeleteRequest("記録って削除できますか？", {
       messages: [assistantLoggedMeal("x")],
@@ -256,6 +370,231 @@ describe("resolveChatDeleteRequest", () => {
     });
 
     expect(request).toBeNull();
+  });
+});
+
+describe("resolveDeleteRecordAction", () => {
+  it("turns an LLM-decided day workout delete action into all exercises for that day", () => {
+    const workouts: Record<string, Workout> = {
+      "2026-06-28": {
+        date: "2026-06-28",
+        updatedAt: "2026-06-28T01:31:00.000Z",
+        exercises: [
+          { id: "hang", name: "懸垂", sets: 3, reps: 5, weight: 0 },
+          { id: "squat", name: "ブルガリアンスクワット", sets: 3, reps: 10, weight: 0 },
+        ],
+      },
+    };
+
+    const request = resolveDeleteRecordAction(
+      { kind: "workout", date: "2026-06-28", scope: "day" },
+      { messages: [], meals: [], workouts },
+    );
+
+    expect(request).toEqual({
+      kind: "workout",
+      scope: "date",
+      date: "2026-06-28",
+      ids: ["hang", "squat"],
+      count: 2,
+    });
+  });
+
+  it("uses names from the LLM action to delete only matching workout exercises", () => {
+    const workouts: Record<string, Workout> = {
+      "2026-06-28": {
+        date: "2026-06-28",
+        updatedAt: "2026-06-28T01:31:00.000Z",
+        exercises: [
+          { id: "hang", name: "懸垂", sets: 3, reps: 5, weight: 0 },
+          { id: "squat", name: "ブルガリアンスクワット", sets: 3, reps: 10, weight: 0 },
+        ],
+      },
+    };
+
+    const request = resolveDeleteRecordAction(
+      { kind: "workout", date: "2026-06-28", scope: "day", names: ["懸垂"] },
+      { messages: [], meals: [], workouts },
+    );
+
+    expect(request).toEqual({
+      kind: "workout",
+      scope: "last",
+      date: "2026-06-28",
+      ids: ["hang"],
+      count: 1,
+    });
+  });
+
+  it("does not broaden an unmatched named workout action into a whole-day delete", () => {
+    const workouts: Record<string, Workout> = {
+      "2026-06-28": {
+        date: "2026-06-28",
+        updatedAt: "2026-06-28T01:31:00.000Z",
+        exercises: [
+          { id: "hang", name: "懸垂", sets: 3, reps: 5, weight: 0 },
+          { id: "squat", name: "ブルガリアンスクワット", sets: 3, reps: 10, weight: 0 },
+        ],
+      },
+    };
+
+    const request = resolveDeleteRecordAction(
+      { kind: "workout", date: "2026-06-28", scope: "day", names: ["ベンチプレス"] },
+      { messages: [], meals: [], workouts },
+    );
+
+    expect(request).toBeNull();
+  });
+
+  it("does not broaden an unmatched named meal action into a whole-day delete", () => {
+    const meals = [
+      meal("lunch", "2026-06-28", "鶏むね肉"),
+      meal("snack", "2026-06-28", "プロテイン"),
+    ];
+
+    const request = resolveDeleteRecordAction(
+      { kind: "meal", date: "2026-06-28", scope: "day", names: ["朝食"] },
+      { messages: [], meals, workouts: {} },
+    );
+
+    expect(request).toBeNull();
+  });
+
+  it("uses chat log metadata for a structured latest meal delete", () => {
+    const meals = [
+      meal("older", "2026-06-28", "朝食"),
+      meal("chat-logged", "2026-06-28", "昼食"),
+    ];
+
+    const request = resolveDeleteRecordAction(
+      { kind: "meal", date: "2026-06-28", scope: "latest" },
+      { messages: [assistantLoggedMeal("chat-logged")], meals, workouts: {} },
+    );
+
+    expect(request).toEqual({
+      kind: "meal",
+      scope: "last",
+      date: "2026-06-28",
+      ids: ["chat-logged"],
+      count: 1,
+    });
+  });
+
+  it("does not turn a structured latest meal action without chat metadata into a newest-meal delete", () => {
+    const meals = [
+      meal("older", "2026-06-28", "朝食"),
+      meal("newest", "2026-06-28", "昼食"),
+    ];
+
+    const request = resolveDeleteRecordAction(
+      { kind: "meal", date: "2026-06-28", scope: "latest" },
+      { messages: [], meals, workouts: {} },
+    );
+
+    expect(request).toBeNull();
+  });
+
+  it("does not turn a latest workout action without chat metadata or names into a whole-day delete", () => {
+    const workouts: Record<string, Workout> = {
+      "2026-06-28": {
+        date: "2026-06-28",
+        updatedAt: "2026-06-28T01:31:00.000Z",
+        exercises: [
+          { id: "hang", name: "懸垂", sets: 3, reps: 5, weight: 0 },
+          { id: "squat", name: "ブルガリアンスクワット", sets: 3, reps: 10, weight: 0 },
+        ],
+      },
+    };
+
+    const request = resolveDeleteRecordAction(
+      { kind: "workout", date: "2026-06-28", scope: "latest" },
+      { messages: [], meals: [], workouts },
+    );
+
+    expect(request).toBeNull();
+  });
+});
+
+describe("resolveDeleteRequestFromCoachReply", () => {
+  it("does not fall back to natural-language deletion when an invalid structured block was present", () => {
+    const workouts: Record<string, Workout> = {
+      "2026-06-28": {
+        date: "2026-06-28",
+        updatedAt: "2026-06-28T01:31:00.000Z",
+        exercises: [
+          { id: "hang", name: "懸垂", sets: 3, reps: 5, weight: 0 },
+          { id: "squat", name: "ブルガリアンスクワット", sets: 3, reps: 10, weight: 0 },
+        ],
+      },
+    };
+
+    const result = resolveDeleteRequestFromCoachReply(
+      `確認します。${DELETE_RECORD_OPEN}{"kind":"workout","date":"今日","scope":"day"}${DELETE_RECORD_CLOSE}`,
+      "今日の運動消して",
+      { messages: [], meals: [], workouts, now: NOW },
+    );
+
+    expect(result).toEqual({
+      display: "確認します。",
+      request: null,
+      handled: true,
+    });
+  });
+
+  it("does not leak orphan delete JSON or fall back when only a close marker is present", () => {
+    const workouts: Record<string, Workout> = {
+      "2026-06-28": {
+        date: "2026-06-28",
+        updatedAt: "2026-06-28T01:31:00.000Z",
+        exercises: [
+          { id: "hang", name: "懸垂", sets: 3, reps: 5, weight: 0 },
+          { id: "squat", name: "ブルガリアンスクワット", sets: 3, reps: 10, weight: 0 },
+        ],
+      },
+    };
+
+    const result = resolveDeleteRequestFromCoachReply(
+      `確認します。{"kind":"workout","date":"2026-06-28","scope":"day"}${DELETE_RECORD_CLOSE}`,
+      "今日の運動消して",
+      { messages: [], meals: [], workouts, now: NOW },
+    );
+
+    expect(result).toEqual({
+      display: "確認します。",
+      request: null,
+      handled: true,
+    });
+  });
+
+  it("still uses natural-language fallback when no structured delete block is present", () => {
+    const workouts: Record<string, Workout> = {
+      "2026-06-28": {
+        date: "2026-06-28",
+        updatedAt: "2026-06-28T01:31:00.000Z",
+        exercises: [
+          { id: "hang", name: "懸垂", sets: 3, reps: 5, weight: 0 },
+          { id: "squat", name: "ブルガリアンスクワット", sets: 3, reps: 10, weight: 0 },
+        ],
+      },
+    };
+
+    const result = resolveDeleteRequestFromCoachReply(
+      "今日の運動記録ですね。",
+      "今日の運動消して",
+      { messages: [], meals: [], workouts, now: NOW },
+    );
+
+    expect(result).toEqual({
+      display: "今日の運動記録ですね。",
+      request: {
+        kind: "workout",
+        scope: "date",
+        date: "2026-06-28",
+        ids: ["hang", "squat"],
+        count: 2,
+      },
+      handled: true,
+    });
   });
 });
 
