@@ -105,7 +105,7 @@ export function claimsCompletedCorrection(prose: string): boolean {
  * UI copy is testable and consistent.
  */
 export const UNSAVED_CLAIM_NOTICE =
-  "（ごめんなさい、システムの都合で今の内容はまだ記録できていません。修正依頼の場合も、保存値はまだ変わっていません。お手数ですが、記録・修正したい食事や運動の内容（品目と量／種目・回数など）をもう一度教えてください。次のお返事できちんと反映します。）";
+  "（保存データはまだ変わっていません。対象を間違えて上書きしないため、日付・種類・対象名・正しい量をもう一度だけ指定してください。例:「今日18:54のプロテインを15gに修正」「今日の腕立てを削除」。）";
 
 /**
  * Make a coach reply HONEST when it claimed a completed save that did not happen.

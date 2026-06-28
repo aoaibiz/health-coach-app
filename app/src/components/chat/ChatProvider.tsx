@@ -68,6 +68,7 @@ import {
   lastLoggedMealId,
   NON_FOOD_ANALYSIS,
 } from "@/lib/chatMealLog";
+import { applyDirectMealCorrectionFromText } from "@/lib/chatMealCorrection";
 import { estimateLoggedMeal } from "@/lib/chatMealEstimate";
 import {
   ambiguousDateNote,
@@ -739,6 +740,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // the user sent it, so an overlapping new-meal send can't steal the target.
         let loggedMeal: ChatMessage["loggedMeal"];
         let failedMealCorrection = false;
+        let directMealCorrectionNote: string | null = null;
         // Track when a block was held back because its day was ambiguous, so the
         // bubble can ask the user to confirm instead of silently mis-recording.
         let ambiguousDate = false;
@@ -776,6 +778,21 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             if (mealTargetDate) backdatedDates.add(mealTargetDate);
           } else if ((mealPayload.mode ?? "new") === "correct") {
             failedMealCorrection = true;
+          }
+        }
+        if (!loggedMeal && (!mealPayload || failedMealCorrection)) {
+          const directCorrection = applyDirectMealCorrectionFromText(trimmed, {
+            meals: loadMeals(),
+            correctId: correctMealId,
+          });
+          if (directCorrection) {
+            saveMeals(directCorrection.meals);
+            loggedMeal = {
+              mealId: directCorrection.mealId,
+              itemCount: directCorrection.itemCount,
+            };
+            failedMealCorrection = false;
+            directMealCorrectionNote = directCorrection.note;
           }
         }
 
@@ -906,6 +923,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           recorded,
           failedCorrection,
         );
+        if (directMealCorrectionNote) {
+          const contradicted =
+            /(記録|登録|修正|訂正|変更|反映|直すこと).{0,12}(できません|できていません|失敗|できなかった)/.test(
+              honestProse,
+            );
+          honestProse = contradicted
+            ? directMealCorrectionNote
+            : `${honestProse}\n\n${directMealCorrectionNote}`;
+        }
         // Feature ②: when a record actually landed on a PAST day, append an honest
         // note per backdated day so the user can see it wasn't logged to today. With
         // per-block dates a meal on 昨日 + a workout on 今日 notes only the 昨日 one.

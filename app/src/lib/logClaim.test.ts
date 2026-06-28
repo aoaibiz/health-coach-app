@@ -65,8 +65,10 @@ describe("reconcileLogClaim — make a false 'recorded' claim honest", () => {
     const out = reconcileLogClaim(prose, /* recorded */ false);
     expect(out).toContain(prose);
     expect(out).toContain(UNSAVED_CLAIM_NOTICE);
-    // The honest notice tells the user it was NOT saved + asks them to restate.
-    expect(out).toContain("まだ記録できていません");
+    // The honest notice tells the user the stored data did NOT change + asks for
+    // the minimum target needed to avoid editing the wrong record.
+    expect(out).toContain("保存データはまだ変わっていません");
+    expect(out).toContain("対象を間違えて上書きしないため");
   });
 
   it("also corrects a false completed-correction claim when no record was updated", () => {

@@ -59,6 +59,10 @@ function normName(name: string): string {
 const SCOOP_FOOD_RE = /(プロテイン|ホエイ|whey|protein|粉末|パウダー)/i;
 const SCOOP_UNIT_RE = "(?:杯|スクープ|スプーン|scoop)";
 
+export function isScoopFoodName(name: string): boolean {
+  return SCOOP_FOOD_RE.test(name);
+}
+
 function normalizeQuantityText(text: string): string {
   return text
     .replace(/[０-９．]/g, (ch) =>
@@ -97,7 +101,7 @@ function scaleAnchorMicros(
   return scaleMicros(micros, ratio);
 }
 
-function scoopPortionFromText(text: string): { gramsPerUnit: number; qty: number } | null {
+export function parseScoopPortionFromText(text: string): { gramsPerUnit: number; qty: number } | null {
   const s = normalizeQuantityText(text);
   const perUnitPatterns = [
     new RegExp(`(?:1\\s*)?${SCOOP_UNIT_RE}\\s*(?:あたり|当たり|=|＝|は|が|で)?\\s*(\\d+(?:\\.\\d+)?)\\s*g`, "i"),
@@ -129,12 +133,12 @@ export function applyUserStatedMealPortions(
   userText?: string,
 ): MealLogPayload {
   if (!userText) return payload;
-  const scoop = scoopPortionFromText(userText);
+  const scoop = parseScoopPortionFromText(userText);
   if (!scoop) return payload;
 
   let changed = false;
   const items = payload.items.map((item) => {
-    if (!SCOOP_FOOD_RE.test(item.name)) return item;
+    if (!isScoopFoodName(item.name)) return item;
     const oldUnitGrams = typeof item.grams === "number" && item.grams > 0 ? item.grams : null;
     const ratio = oldUnitGrams ? scoop.gramsPerUnit / oldUnitGrams : null;
     const micros = scaleAnchorMicros(item.micros, ratio);
