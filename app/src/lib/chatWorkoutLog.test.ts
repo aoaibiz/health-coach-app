@@ -174,29 +174,32 @@ describe("applyWorkoutLog — explicit mode (new/correct) + history resolution",
     expect(totalVolume(day.exercises)).toBe(1440);
   });
 
-  it("(c) after clear() (empty history) a correct safely APPENDS — no stale clobber", () => {
+  it("(c) after clear() (empty history) a correct logs NOTHING — no stale clobber or duplicate", () => {
     const existing = applyWorkoutLog(benchPayload, { workouts: {}, correctIds: null, makeSetId })!;
     const resolvedAfterClear = lastLoggedWorkoutIds([]); // history cleared
     expect(resolvedAfterClear).toBeNull();
     const r = applyWorkoutLog(
       { exercises: [{ name: "デッドリフト", sets: [{ weight: 100, reps: 5 }] }], mode: "correct" },
       { workouts: existing.workouts, correctIds: resolvedAfterClear, makeSetId },
-    )!;
-    expect(r.workouts[r.date].exercises).toHaveLength(2); // appended, not clobbered
+    );
+    expect(r).toBeNull();
+    expect(existing.workouts[existing.date].exercises).toHaveLength(1);
   });
 
-  it("a correct whose targets were deleted on /workout safely APPENDS (no ghost update)", () => {
+  it("a correct whose targets were deleted on /workout logs NOTHING (no ghost update or duplicate)", () => {
     const first = applyWorkoutLog(benchPayload, { workouts: {}, correctIds: null, makeSetId })!;
     // User deleted the exercises on the 筋トレ page → today's workout is empty, but
-    // history still points at the old ids. A correct must re-log (append).
+    // history still points at the old ids. A correct must not pretend it updated,
+    // and must not append a duplicate under a correction claim.
     const emptyDay: Record<string, Workout> = {
       [first.date]: { date: first.date, exercises: [], updatedAt: new Date().toISOString() },
     };
     const r = applyWorkoutLog(
       { ...benchPayload, mode: "correct" },
       { workouts: emptyDay, correctIds: first.exerciseIds, makeSetId },
-    )!;
-    expect(r.workouts[r.date].exercises).toHaveLength(1);
+    );
+    expect(r).toBeNull();
+    expect(emptyDay[first.date].exercises).toHaveLength(0);
   });
 
   it("a correction that REMOVES an exercise leaves no orphan from the old batch", () => {

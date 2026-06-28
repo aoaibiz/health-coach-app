@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   analysisToChatContext,
   applyMealLog,
+  applyUserStatedMealPortions,
   buildLoggedMeal,
   lastLoggedMealId,
   NON_FOOD_ANALYSIS,
@@ -105,11 +106,11 @@ describe("groundMealLogItem — 0/missing grams default to a portion (a DB food 
   it("さつまいも (db) with grams 0 → defaults to 100g → a real DB kcal, NOT 0", () => {
     // さつまいも matches the official DB (02006, 126kcal/100g). With grams 0 the old
     // path computed 126 × 0/100 = 0 (the bug: 公式DB but 0 kcal). Now grams default
-    // to 100g → 126kcal, and the basis is still the DB's (126), never invented.
+    // to the shared 1本=150g portion, and the basis is still the DB's (126), never invented.
     const item = groundMealLogItem({ name: "さつまいも", grams: 0, source: "db" });
     expect(item.sourceKind).toBe("db"); // still 公式DB
-    expect(item.grams).toBe(100); // defaulted portion (an estimate the user can edit)
-    expect(item.kcal).toBe(126); // 126/100g × 100g — a REAL DB number, never 0
+    expect(item.grams).toBe(150); // defaulted portion (an estimate the user can edit)
+    expect(item.kcal).toBe(189); // 126/100g × 150g — a REAL DB number, never 0
     expect(item.kcal).not.toBe(0);
     // PROOF the per-100g basis is the DB's, NOT fabricated.
     expect(item.basisPer100g?.kcal).toBe(126);
@@ -132,8 +133,8 @@ describe("groundMealLogItem — 0/missing grams default to a portion (a DB food 
 
   it("a NEGATIVE grams also defaults to 100g (clampGrams maps ≤0 → default)", () => {
     const item = groundMealLogItem({ name: "さつまいも", grams: -50, source: "db" } as MealLogPayload["items"][number]);
-    expect(item.grams).toBe(100);
-    expect(item.kcal).toBe(126);
+    expect(item.grams).toBe(150);
+    expect(item.kcal).toBe(189);
   });
 
   it("the smuggled-9999 case still wins from the DB even with grams 0 (fabrication-safety intact)", () => {
@@ -180,8 +181,8 @@ describe("groundMealLogItem — 0/missing grams default to a portion (a DB food 
   //    of looking "適当に入れた" (a confirmed figure built on a hidden assumption). ──
   it("a portion-DEFAULTED db food is confidence 'medium' (honest about the guessed portion)", () => {
     const item = groundMealLogItem({ name: "さつまいも", grams: 0, source: "db" });
-    expect(item.grams).toBe(100); // defaulted portion
-    expect(item.kcal).toBe(126); // still the EXACT DB number (not arbitrary)
+    expect(item.grams).toBe(150); // defaulted portion
+    expect(item.kcal).toBe(189); // still the EXACT DB number (not arbitrary)
     expect(item.sourceKind).toBe("db"); // still 公式DB — the basis really is the DB's
     expect(item.confidence).toBe("medium"); // …but flagged as a portion estimate
   });
@@ -189,6 +190,34 @@ describe("groundMealLogItem — 0/missing grams default to a portion (a DB food 
   it("a db food with a STATED portion stays confidence 'high' (regression guard)", () => {
     const item = groundMealLogItem({ name: "さつまいも", grams: 200, source: "db" });
     expect(item.confidence).toBe("high"); // a real stated portion → fully confirmed
+  });
+
+  it("a standard-basis protein item ignores a tiny guessed grams and uses the shared serving", () => {
+    const item = groundMealLogItem({
+      name: "鶏むね肉 皮なし",
+      grams: 20,
+      source: "db",
+      portion_basis: "standard",
+    });
+    expect(item.sourceKind).toBe("db");
+    expect(item.grams).toBe(100);
+    expect(item.kcal).toBe(177);
+    expect(item.proteinG).toBe(38.8);
+    expect(item.basisPer100g?.foodCode).toBe("11288");
+    expect(item.confidence).toBe("medium");
+  });
+
+  it("a stated small protein portion is preserved when the user actually gave that amount", () => {
+    const item = groundMealLogItem({
+      name: "鶏むね肉 皮なし",
+      grams: 20,
+      source: "db",
+      portion_basis: "stated",
+    });
+    expect(item.grams).toBe(20);
+    expect(item.kcal).toBe(35.4);
+    expect(item.proteinG).toBe(7.8);
+    expect(item.confidence).toBe("high");
   });
 });
 
@@ -203,7 +232,7 @@ describe("full chain (parse→ground→log) — a NAMED grams:0 db food logs a r
     return `登録しておきました。\n${MEAL_LOG_OPEN}${JSON.stringify(json)}${MEAL_LOG_CLOSE}`;
   }
 
-  it("{name:'さつまいも', grams:0, source:'db'} → ONE item, real DB kcal (126, basis 126), NOT 0 and NOT dropped", () => {
+  it("{name:'さつまいも', grams:0, source:'db'} → ONE item, real DB kcal (189, basis 126), NOT 0 and NOT dropped", () => {
     // The residual-of-the-焼きさつまいも-bug case: a named db food with grams 0.
     // Old behaviour: parser DROPPED it → all items gone → payload null → nothing
     // logged. New behaviour: parser KEEPS it (grams 0), grounding defaults to 100g,
@@ -226,13 +255,13 @@ describe("full chain (parse→ground→log) — a NAMED grams:0 db food logs a r
     const imo = items[0];
     expect(imo.name).toBe("さつまいも");
     expect(imo.sourceKind).toBe("db"); // still 公式DB
-    expect(imo.grams).toBe(100); // grounding defaulted the portion
-    expect(imo.kcal).toBe(126); // 126/100g × 100g — a REAL DB number…
+    expect(imo.grams).toBe(150); // grounding defaulted the portion
+    expect(imo.kcal).toBe(189); // 126/100g × 150g — a REAL DB number…
     expect(imo.kcal).not.toBe(0); // …never 0
     expect(imo.basisPer100g?.kcal).toBe(126); // DB basis, NOT fabricated
     expect(imo.basisPer100g?.foodCode).toBe("02006");
     // The meal total is the grounded DB calorie, not 0 and not the model's text.
-    expect(meal!.nutrition!.calories).toBe(126);
+    expect(meal!.nutrition!.calories).toBe(189);
   });
 
   it("a NO-NAME item is STILL dropped end-to-end (nameless garbage → not logged)", () => {
@@ -258,6 +287,43 @@ describe("full chain (parse→ground→log) — a NAMED grams:0 db food logs a r
     expect(rice.grams).toBe(150); // shared standard portion (rice 茶碗1杯)
     expect(rice.kcal).toBe(234); // 156/100g × 150g — real DB number, never 0
     expect(rice.basisPer100g?.kcal).toBe(156);
+  });
+
+  it("Ao's 18:54 menu does not collapse to an implausibly-low P13 when portions are unstated", () => {
+    const meal = buildLoggedMeal({
+      items: [
+        { name: "鶏むね肉 皮なし", grams: 20, source: "db", portion_basis: "standard" },
+        { name: "卵", grams: 50, source: "db", portion_basis: "stated" },
+        {
+          name: "豚バラ野菜炒め",
+          grams: 200,
+          source: "estimate",
+          portion_basis: "estimated",
+          kcal: 320,
+          protein_g: 12,
+          fat_g: 24,
+          carb_g: 12,
+        },
+        {
+          name: "ハイボール",
+          grams: 350,
+          source: "estimate",
+          portion_basis: "standard",
+          kcal: 80,
+          protein_g: 0,
+          fat_g: 0,
+          carb_g: 0,
+        },
+        { name: "さつまいも", grams: 0, source: "db", portion_basis: "standard" },
+      ],
+      type: "昼",
+    });
+    expect(meal).not.toBeNull();
+    expect(meal!.nutrition!.items).toHaveLength(5);
+    expect(meal!.nutrition!.calories).toBe(837);
+    expect(meal!.nutrition!.proteinG).toBe(58.7);
+    expect(meal!.nutrition!.proteinG).toBeGreaterThan(40);
+    expect(meal!.nutrition!.sourceKind).toBe("estimate");
   });
 });
 
@@ -414,6 +480,112 @@ describe("analysisToChatContext — presentation context only", () => {
   });
 });
 
+describe("buildLoggedMeal — analysis reconciliation keeps source and portion honest", () => {
+  it("forces source back to db when the grounded analysis matched a DB food", () => {
+    const analysis: ChatMealAnalysis = {
+      ok: true,
+      items: [{ name: "ごはん", grams: 150, kcal: 234, proteinG: 3.8, sourceKind: "db" }],
+    };
+    const meal = buildLoggedMeal(
+      {
+        items: [
+          {
+            name: "ごはん",
+            grams: 150,
+            source: "estimate",
+            portion_basis: "estimated",
+            kcal: 999,
+            protein_g: 999,
+          },
+        ],
+      },
+      { analysis },
+    );
+    const item = meal!.nutrition!.items![0];
+    expect(item.sourceKind).toBe("db");
+    expect(item.kcal).toBe(234);
+    expect(item.proteinG).toBe(3.8);
+    expect(item.basisPer100g?.foodCode).toBe("01088");
+    expect(meal!.nutrition!.sourceKind).toBe("db");
+  });
+
+  it("preserves analysis grams for label/estimate items even when the chat block had standard basis", () => {
+    const analysis: ChatMealAnalysis = {
+      ok: true,
+      items: [
+        {
+          name: "プロテイン",
+          grams: 60,
+          kcal: 240,
+          proteinG: 48,
+          fatG: 2,
+          carbG: 6,
+          sourceKind: "estimate",
+        },
+      ],
+    };
+    const meal = buildLoggedMeal(
+      {
+        items: [
+          {
+            name: "プロテイン",
+            grams: 0,
+            source: "estimate",
+            portion_basis: "standard",
+            kcal: 1,
+            protein_g: 1,
+          },
+        ],
+      },
+      { analysis },
+    );
+    const item = meal!.nutrition!.items![0];
+    expect(item.sourceKind).toBe("estimate");
+    expect(item.grams).toBe(60);
+    expect(item.kcal).toBe(240);
+    expect(item.proteinG).toBe(48);
+  });
+});
+
+describe("applyUserStatedMealPortions — user-stated scoop math beats LLM grams", () => {
+  it("corrects protein powder from an implausible total to 1 scoop grams × scoop count", () => {
+    const fixed = applyUserStatedMealPortions(
+      {
+        items: [
+          {
+            name: "プロテイン",
+            grams: 120,
+            source: "estimate",
+            portion_basis: "estimated",
+            kcal: 480,
+            protein_g: 96,
+            fat_g: 8,
+            carb_g: 12,
+          },
+        ],
+        type: "間食",
+      },
+      "すり切り1.5杯の粉を水に溶かして飲んだ。1杯あたり10gです。",
+    );
+
+    expect(fixed.items[0]).toMatchObject({
+      name: "プロテイン",
+      grams: 10,
+      qty: 1.5,
+      portion_basis: "stated",
+      kcal: 40,
+      protein_g: 8,
+    });
+
+    const meal = buildLoggedMeal(fixed, { date: "2026-06-28" });
+    const protein = meal!.nutrition!.items![0];
+    expect(protein.grams).toBe(10);
+    expect(protein.qty).toBe(1.5);
+    expect(protein.kcal).toBe(60);
+    expect(protein.proteinG).toBe(12);
+  });
+});
+
 describe("applyMealLog — explicit mode (new/correct) + history resolution (de-dupe redesign)", () => {
   // The redesign: the dedupe signal is now CARRIED in the block (payload.mode) and
   // resolved against PERSISTED chat history (correctId), not an in-memory ref.
@@ -434,6 +606,126 @@ describe("applyMealLog — explicit mode (new/correct) + history resolution (de-
     expect(r!.meals[0].id).toBe(r!.mealId);
     expect(r!.itemCount).toBe(1);
     expect(r!.meals[0].nutrition?.calories).toBe(234); // grounded, not model text
+  });
+
+  it("uses the user's latest text to correct implausible protein scoop grams before saving", () => {
+    const r = applyMealLog(
+      {
+        items: [
+          {
+            name: "プロテイン",
+            grams: 120,
+            source: "estimate",
+            portion_basis: "estimated",
+            kcal: 480,
+            protein_g: 96,
+          },
+        ],
+        type: "間食",
+      },
+      {
+        meals: [],
+        correctId: null,
+        userText: "プロテインを飲みました。すり切り1.5杯、1杯あたり10gです。",
+      },
+    )!;
+    const item = r.meals[0].nutrition?.items?.[0];
+    expect(item?.grams).toBe(10);
+    expect(item?.qty).toBe(1.5);
+    expect(item?.kcal).toBe(60);
+    expect(item?.proteinG).toBe(12);
+  });
+
+  it("keeps user-stated scoop math even when photo analysis had an older larger estimate", () => {
+    const r = applyMealLog(
+      {
+        items: [
+          {
+            name: "プロテイン",
+            grams: 120,
+            source: "estimate",
+            portion_basis: "estimated",
+            kcal: 480,
+            protein_g: 96,
+          },
+        ],
+        type: "間食",
+      },
+      {
+        meals: [],
+        correctId: null,
+        userText: "プロテインを飲みました。すり切り1.5杯、1杯あたり10gです。",
+        analysis: {
+          ok: true,
+          estimated: true,
+          items: [
+            {
+              name: "プロテイン",
+              grams: 120,
+              kcal: 480,
+              proteinG: 96,
+              fatG: 8,
+              carbG: 12,
+              micros: { calcium: 240, iron: 12 },
+              sourceKind: "estimate",
+              sourceLabel: "推定値",
+            },
+          ],
+        },
+      },
+    )!;
+    const item = r.meals[0].nutrition?.items?.[0];
+    expect(item?.grams).toBe(10);
+    expect(item?.qty).toBe(1.5);
+    expect(item?.kcal).toBe(60);
+    expect(item?.proteinG).toBe(12);
+    expect(item?.micros?.calcium).toBe(30);
+    expect(item?.micros?.iron).toBe(1.5);
+  });
+
+  it("keeps scoop math and analysis nutrients when the model wrongly tags protein powder as db", () => {
+    const r = applyMealLog(
+      {
+        items: [
+          {
+            name: "プロテイン",
+            grams: 120,
+            source: "db",
+            portion_basis: "estimated",
+            kcal: 480,
+            protein_g: 96,
+          },
+        ],
+        type: "間食",
+      },
+      {
+        meals: [],
+        correctId: null,
+        userText: "プロテインを飲みました。すり切り1.5杯、1杯あたり10gです。",
+        analysis: {
+          ok: true,
+          estimated: true,
+          items: [
+            {
+              name: "プロテイン",
+              grams: 120,
+              kcal: 480,
+              proteinG: 96,
+              fatG: 8,
+              carbG: 12,
+              sourceKind: "estimate",
+              sourceLabel: "推定値",
+            },
+          ],
+        },
+      },
+    )!;
+    const item = r.meals[0].nutrition?.items?.[0];
+    expect(item?.sourceKind).toBe("estimate");
+    expect(item?.grams).toBe(10);
+    expect(item?.qty).toBe(1.5);
+    expect(item?.kcal).toBe(60);
+    expect(item?.proteinG).toBe(12);
   });
 
   it("an omitted mode defaults to NEW — never overwrites a prior meal", () => {
@@ -506,20 +798,20 @@ describe("applyMealLog — explicit mode (new/correct) + history resolution (de-
     expect(second.meals[0].nutrition?.calories).toBe(234 + 71); // re-grounded
   });
 
-  // ── (c) clear() then log = append, no stale clobber ──
-  it("(c) after clear() (empty history) a correct safely APPENDS — no stale clobber", () => {
+  // ── (c) clear() then correct = no-op, no stale clobber and no false correction ──
+  it("(c) after clear() (empty history) a correct logs NOTHING — no stale clobber or duplicate", () => {
     // A meal exists in the store, but the chat history was cleared. The coach (or
     // a stray block) emits mode:"correct" — with no history there's no target, so
-    // correctId is null → it must APPEND, never clobber the existing meal.
+    // correctId is null → it must NOT append a duplicate and make "直しました"
+    // appear true.
     const existing = applyMealLog(ricePayload, { meals: [], correctId: null })!;
     const resolvedAfterClear = lastLoggedMealId([]); // history cleared
     expect(resolvedAfterClear).toBeNull();
     const r = applyMealLog(
       { items: [{ name: "鶏むね肉", grams: 100, source: "db" }], type: "夕", mode: "correct" },
       { meals: existing.meals, correctId: resolvedAfterClear },
-    )!;
-    expect(r.meals).toHaveLength(2); // appended, not merged onto the old meal
-    expect(r.mealId).not.toBe(existing.mealId);
+    );
+    expect(r).toBeNull();
   });
 
   it("applying the SAME correct payload twice is idempotent (no duplicate)", () => {
@@ -547,16 +839,16 @@ describe("applyMealLog — explicit mode (new/correct) + history resolution (de-
     expect(second.meals[0].timestamp).toBe(ts); // not drifted to 20:09
   });
 
-  it("if the meal was deleted in /meal, a correct APPENDS (no ghost update)", () => {
+  it("if the meal was deleted in /meal, a correct logs NOTHING (no ghost update or duplicate)", () => {
     const first = applyMealLog(ricePayload, { meals: [], correctId: null })!;
     // User deletes it in /meal → store no longer has that id, but history still
-    // points at it. A correct must re-log (append), not silently no-op.
+    // points at it. A correct must not pretend it updated, and must not append a
+    // duplicate under a correction claim.
     const r = applyMealLog(
       { ...ricePayload, mode: "correct" },
       { meals: [], correctId: first.mealId }, // stale id, not in store
-    )!;
-    expect(r.meals).toHaveLength(1);
-    expect(r.meals[0].nutrition?.calories).toBe(234);
+    );
+    expect(r).toBeNull();
   });
 
   it("single AND multi-photo meals each log exactly ONE entry (mode new)", () => {
@@ -605,10 +897,10 @@ describe("applyMealLog — explicit mode (new/correct) + history resolution (de-
     expect(second.meals).toHaveLength(1); // updated in place, same id
     expect(second.mealId).toBe(first.mealId);
     const item = second.meals[0].nutrition!.items![0];
-    expect(item.grams).toBe(100); // defaulted
-    expect(item.kcal).toBe(126); // 126/100g × 100g — never 0
+    expect(item.grams).toBe(150); // defaulted
+    expect(item.kcal).toBe(189); // 126/100g × 150g — never 0
     expect(item.basisPer100g?.kcal).toBe(126); // DB basis, not fabricated
-    expect(second.meals[0].nutrition?.calories).toBe(126);
+    expect(second.meals[0].nutrition?.calories).toBe(189);
   });
 
   it("returns null (logs nothing) when the payload grounds to nothing", () => {

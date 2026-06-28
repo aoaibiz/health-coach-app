@@ -89,7 +89,7 @@ import {
 } from "@/lib/chatMealPlan";
 import { parseSleepReply } from "@/lib/sleepLogProtocol";
 import { applySleepLog } from "@/lib/chatSleepLog";
-import { reconcileLogClaim } from "@/lib/logClaim";
+import { reconcileLogClaimWithFailedCorrection } from "@/lib/logClaim";
 import {
   deleteConfirmation,
   resolveDeleteRequestFromCoachReply,
@@ -738,6 +738,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // reply time) means a correction binds to the meal/workout that existed when
         // the user sent it, so an overlapping new-meal send can't steal the target.
         let loggedMeal: ChatMessage["loggedMeal"];
+        let failedMealCorrection = false;
         // Track when a block was held back because its day was ambiguous, so the
         // bubble can ask the user to confirm instead of silently mis-recording.
         let ambiguousDate = false;
@@ -761,6 +762,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             photoId,
             // CHANGE 3: tighten label/estimate numbers to the grounded analysis.
             analysis: mealAnalysis,
+            userText: trimmed,
           });
           if (applied) {
             // Fill DB-miss (no-number 推定値) items with a real labelled AI estimate
@@ -772,10 +774,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             saveMeals(enriched);
             loggedMeal = { mealId: applied.mealId, itemCount: applied.itemCount };
             if (mealTargetDate) backdatedDates.add(mealTargetDate);
+          } else if ((mealPayload.mode ?? "new") === "correct") {
+            failedMealCorrection = true;
           }
         }
 
         let loggedWorkout: ChatMessage["loggedWorkout"];
+        let failedWorkoutCorrection = false;
         const workoutIsNew = (workoutPayload?.mode ?? "new") === "new";
         const workoutTargetDate = workoutIsNew ? (workoutDate.dateKey ?? undefined) : undefined;
         if (workoutPayload && workoutIsNew && workoutDate.ambiguous) {
@@ -794,6 +799,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               exerciseCount: applied.exerciseCount,
             };
             if (workoutTargetDate) backdatedDates.add(workoutTargetDate);
+          } else if ((workoutPayload.mode ?? "new") === "correct") {
+            failedWorkoutCorrection = true;
           }
         }
 
@@ -892,7 +899,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         const baseProse =
           display.trim() ||
           "内容を確認しました。対象が分からない場合は、日付・種類・範囲を指定してもう一度教えてください。";
-        let honestProse = reconcileLogClaim(baseProse, recorded);
+        const failedCorrection =
+          failedMealCorrection || failedWorkoutCorrection;
+        let honestProse = reconcileLogClaimWithFailedCorrection(
+          baseProse,
+          recorded,
+          failedCorrection,
+        );
         // Feature ②: when a record actually landed on a PAST day, append an honest
         // note per backdated day so the user can see it wasn't logged to today. With
         // per-block dates a meal on 昨日 + a workout on 今日 notes only the 昨日 one.

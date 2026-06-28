@@ -119,11 +119,13 @@ export interface ApplyWorkoutLogResult {
  *     `correctIds`, resolved by the caller from the assistant message that carried
  *     `loggedWorkout`) with the freshly grounded ones, in place, keeping the same
  *     ids where possible. Survives reload (history persisted); after clear() there
- *     is no history → correctIds empty → it safely APPENDS.
+ *     is no history → correctIds empty → it logs nothing and the caller makes the
+ *     reply honest instead of pretending a correction landed.
  *
  * A "correct" whose target ids are all gone from the store (deleted on the 筋トレ
- * page) safely APPENDS — no ghost update. Idempotent: a repeated "correct"
- * re-grounds the same batch rather than duplicating it.
+ * page) returns null — no ghost update, no duplicate append, no false
+ * "直しました". Idempotent: a repeated "correct" re-grounds the same batch
+ * rather than duplicating it.
  *
  * FABRICATION SAFETY is unchanged: each Exercise is built by buildLoggedExercise,
  * whose volume/burn come ONLY from the grounded libs — never from the model.
@@ -156,6 +158,10 @@ export function applyWorkoutLog(
   // today's workout; otherwise it falls through to APPEND (no ghost update).
   const targetsPresent =
     correctIds.length > 0 && day.exercises.some((e) => correctIds.includes(e.id));
+
+  if (mode === "correct" && !targetsPresent) {
+    return null;
+  }
 
   // Build fresh grounded exercises. On a correct with present targets, reuse the
   // first N existing ids so the entries keep their identity across the update.

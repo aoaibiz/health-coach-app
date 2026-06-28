@@ -44,6 +44,8 @@ export type Confidence = "low" | "medium" | "high";
 
 /** Which of the three sources backs a number. */
 export type SourceKind = "db" | "label" | "estimate";
+/** How the item portion was selected by the model/user. */
+export type PortionBasis = "stated" | "estimated" | "standard" | "unknown";
 
 /** Display label per source — shown in the UI as a badge (anti-fabrication). */
 export const SOURCE_LABEL: Record<SourceKind, string> = {
@@ -77,6 +79,9 @@ export interface IdentifiedDish {
   confidence?: Confidence;
   /** Where the numbers should come from. Defaults to "db" when omitted. */
   source?: SourceKind;
+  /** Whether grams are user-stated, estimated from the scene, or a standard/unknown
+   *  serving. Standard/unknown portions are resolved through the shared table. */
+  portion_basis?: PortionBasis;
   /** Model-supplied numbers (label/estimate only); ignored for matched "db". */
   kcal?: number;
   protein_g?: number;
@@ -781,7 +786,9 @@ export function groundDish(dish: IdentifiedDish): GroundedItem {
   // portion (functions/_lib/standard-portions) — the SAME table the chat MEAL_LOG
   // grounding uses, so an unstated コーヒー lands on 200g on BOTH paths → the SAME
   // kcal (fixes the 8 vs 10 divergence). Then clampGrams bounds an absurd value.
-  const grams = clampGrams(resolveStandardGrams(dish.name, dish.grams).grams);
+  const gramsForResolver =
+    dish.portion_basis === "standard" || dish.portion_basis === "unknown" ? 0 : dish.grams;
+  const grams = clampGrams(resolveStandardGrams(dish.name, gramsForResolver).grams);
   const source: SourceKind = dish.source ?? "db";
 
   // ---- label / estimate: the model supplies the numbers (not the DB) --------

@@ -21,6 +21,7 @@ import type { Meal, MealNutrition, MealType } from "./types";
 import { groundMealLogItems } from "./foodGrounding";
 import { itemsToNutrition } from "./mealItems";
 import { makeId, toDateKey } from "./date";
+import { scaleMicros } from "../../functions/_lib/micros";
 
 /**
  * Map the grounded analysis (the existing MealNutrition with its per-item
@@ -55,6 +56,154 @@ function normName(name: string): string {
   return name.trim().toLowerCase().replace(/\s+/g, "");
 }
 
+const SCOOP_FOOD_RE = /(プロテイン|ホエイ|whey|protein|粉末|パウダー)/i;
+const SCOOP_UNIT_RE = "(?:杯|スクープ|スプーン|scoop)";
+
+function normalizeQuantityText(text: string): string {
+  return text
+    .replace(/[０-９．]/g, (ch) =>
+      ch === "．" ? "." : String.fromCharCode(ch.charCodeAt(0) - 0xfee0),
+    )
+    .replace(/一/g, "1")
+    .replace(/二/g, "2")
+    .replace(/三/g, "3");
+}
+
+function toPositiveNumber(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function roundOne(n: number): number {
+  return Math.round(n * 10) / 10;
+}
+
+function finiteNumber(v: number | null | undefined): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+function scaleAnchor(v: number | undefined, ratio: number | null): number | undefined {
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0) return v;
+  if (ratio === null || !Number.isFinite(ratio) || ratio <= 0) return undefined;
+  return roundOne(v * ratio);
+}
+
+function scaleAnchorMicros(
+  micros: MealLogItemPayload["micros"] | ChatMealAnalysisItem["micros"],
+  ratio: number | null,
+): MealLogItemPayload["micros"] | undefined {
+  if (!micros || ratio === null || !Number.isFinite(ratio) || ratio <= 0) return undefined;
+  return scaleMicros(micros, ratio);
+}
+
+function scoopPortionFromText(text: string): { gramsPerUnit: number; qty: number } | null {
+  const s = normalizeQuantityText(text);
+  const perUnitPatterns = [
+    new RegExp(`(?:1\\s*)?${SCOOP_UNIT_RE}\\s*(?:あたり|当たり|=|＝|は|が|で)?\\s*(\\d+(?:\\.\\d+)?)\\s*g`, "i"),
+    new RegExp(`(\\d+(?:\\.\\d+)?)\\s*g\\s*(?:/|／|毎|あたり|当たり)?\\s*(?:1\\s*)?${SCOOP_UNIT_RE}`, "i"),
+  ];
+  const gramsPerUnit = perUnitPatterns
+    .map((re) => toPositiveNumber(re.exec(s)?.[1]))
+    .find((n): n is number => n !== null);
+  if (!gramsPerUnit) return null;
+
+  const countRe = new RegExp(`(\\d+(?:\\.\\d+)?)\\s*${SCOOP_UNIT_RE}(?!\\s*(?:あたり|当たり))`, "gi");
+  let m: RegExpExecArray | null;
+  while ((m = countRe.exec(s)) !== null) {
+    const qty = toPositiveNumber(m[1]);
+    if (qty !== null) return { gramsPerUnit, qty };
+    if (m.index === countRe.lastIndex) countRe.lastIndex++;
+  }
+  return { gramsPerUnit, qty: 1 };
+}
+
+/**
+ * Correct obvious scoop arithmetic that the LLM sometimes mis-converts in the
+ * MEAL_LOG block. Example: user says "1杯あたり10g、1.5杯" but the block says
+ * grams:120. The user's arithmetic wins; anchors are scaled to the corrected
+ * per-unit grams and remain labelled/estimated downstream.
+ */
+export function applyUserStatedMealPortions(
+  payload: MealLogPayload,
+  userText?: string,
+): MealLogPayload {
+  if (!userText) return payload;
+  const scoop = scoopPortionFromText(userText);
+  if (!scoop) return payload;
+
+  let changed = false;
+  const items = payload.items.map((item) => {
+    if (!SCOOP_FOOD_RE.test(item.name)) return item;
+    const oldUnitGrams = typeof item.grams === "number" && item.grams > 0 ? item.grams : null;
+    const ratio = oldUnitGrams ? scoop.gramsPerUnit / oldUnitGrams : null;
+    const micros = scaleAnchorMicros(item.micros, ratio);
+    changed = true;
+    return {
+      ...item,
+      source: (item.source === "label" ? "label" : "estimate") as MealLogItemPayload["source"],
+      grams: scoop.gramsPerUnit,
+      qty: scoop.qty,
+      portion_basis: "stated" as const,
+      kcal: scaleAnchor(item.kcal, ratio),
+      protein_g: scaleAnchor(item.protein_g, ratio),
+      fat_g: scaleAnchor(item.fat_g, ratio),
+      carb_g: scaleAnchor(item.carb_g, ratio),
+      fiber_g: scaleAnchor(item.fiber_g, ratio),
+      sugar_g: scaleAnchor(item.sugar_g, ratio),
+      sodium_mg: scaleAnchor(item.sodium_mg, ratio),
+      saturated_fat_g: scaleAnchor(item.saturated_fat_g, ratio),
+      ...(micros ? { micros } : {}),
+    };
+  });
+
+  return changed ? { ...payload, items } : payload;
+}
+
+function analysisSource(sourceKind: ChatMealAnalysisItem["sourceKind"]): "label" | "estimate" | null {
+  if (sourceKind === "label") return "label";
+  if (sourceKind === "estimate") return "estimate";
+  return null;
+}
+
+function withStatedPortionAnalysisAnchor(
+  item: MealLogItemPayload,
+  match: ChatMealAnalysisItem,
+): MealLogItemPayload {
+  const source = item.source === "label" ? "label" : analysisSource(match.sourceKind);
+  if (!source) return item;
+  const ratio =
+    typeof match.grams === "number" && Number.isFinite(match.grams) && match.grams > 0
+      ? item.grams / match.grams
+      : null;
+  const next: MealLogItemPayload = {
+    ...item,
+    source,
+    portion_basis: "stated",
+  };
+
+  const kcal = scaleAnchor(finiteNumber(match.kcal), ratio);
+  if (kcal !== undefined) next.kcal = kcal;
+  const protein = scaleAnchor(finiteNumber(match.proteinG), ratio);
+  if (protein !== undefined) next.protein_g = protein;
+  const fat = scaleAnchor(finiteNumber(match.fatG), ratio);
+  if (fat !== undefined) next.fat_g = fat;
+  const carb = scaleAnchor(finiteNumber(match.carbG), ratio);
+  if (carb !== undefined) next.carb_g = carb;
+  const fiber = scaleAnchor(finiteNumber(match.fiberG), ratio);
+  if (fiber !== undefined) next.fiber_g = fiber;
+  const sugar = scaleAnchor(finiteNumber(match.sugarG), ratio);
+  if (sugar !== undefined) next.sugar_g = sugar;
+  const sodium = scaleAnchor(finiteNumber(match.sodiumMg), ratio);
+  if (sodium !== undefined) next.sodium_mg = sodium;
+  const saturatedFat = scaleAnchor(finiteNumber(match.saturatedFatG), ratio);
+  if (saturatedFat !== undefined) next.saturated_fat_g = saturatedFat;
+  const micros = scaleAnchorMicros(match.micros, ratio);
+  if (micros !== undefined) next.micros = micros;
+
+  return next;
+}
+
 /**
  * CHANGE 3 — tighten label/estimate numbers to the ANALYSIS, not the chat LLM.
  *
@@ -86,6 +235,13 @@ function reconcileWithAnalysis(
     // Only override when the analysis grounded an actual kcal for this item.
     if (!match || typeof match.kcal !== "number") return item;
 
+    // User-stated portions are the top authority for grams/qty. Analysis may still
+    // provide the label/estimate nutrient anchor, scaled to the stated per-unit
+    // grams, especially when the LLM wrongly tagged a supplement as source:"db".
+    if (item.portion_basis === "stated") {
+      return withStatedPortionAnalysisAnchor(item, match);
+    }
+
     const source = item.source ?? "db";
     // A db analysis match stays DB-authoritative and recomputes from the official DB.
     // But if the chat block wrongly tagged an unmatched supplement/product as db
@@ -93,9 +249,32 @@ function reconcileWithAnalysis(
     // carry that sourced estimate through instead of logging a no-number 0 kcal row.
     if (source === "db" && match.sourceKind === "db") return item;
 
+    const itemWithoutAnchors: MealLogItemPayload = {
+      name: item.name,
+      grams: item.grams,
+      ...(item.qty !== undefined ? { qty: item.qty } : {}),
+      ...(item.source ? { source: item.source } : {}),
+      ...(item.portion_basis ? { portion_basis: item.portion_basis } : {}),
+    };
+
+    if (match.sourceKind === "db") {
+      return {
+        ...itemWithoutAnchors,
+        source: "db",
+        // Preserve the grounded analysis portion; do not let a stale
+        // portion_basis:"standard" re-default it later.
+        portion_basis: "estimated",
+        grams: match.grams,
+        qty: 1,
+      };
+    }
+
     return {
-      ...item,
+      ...itemWithoutAnchors,
       source: source === "db" ? (match.sourceKind === "label" ? "label" : "estimate") : source,
+      // Preserve the grounded analysis portion; do not let a stale
+      // portion_basis:"standard" re-default it later.
+      portion_basis: "estimated",
       // Use the analysis's grounded portion + numbers as the candidate anchor, so
       // the logged label/estimate equals the analysis (not the chat model's retype).
       grams: match.grams,
@@ -173,6 +352,7 @@ export interface ApplyMealLogResult {
   meals: Meal[];
   mealId: string;
   itemCount: number;
+  action: "appended" | "updated";
 }
 
 /**
@@ -189,13 +369,14 @@ export interface ApplyMealLogResult {
  *     that meal's id, which the caller resolves from the persisted chat history
  *     (the assistant message that carried `loggedMeal`). Because history is
  *     persisted, this survives a page reload / remount (under-merge fixed); after
- *     clear() there is no history → correctId is null → it safely APPENDS.
+ *     clear() there is no history → correctId is null → it logs nothing and the
+ *     caller can make the reply honest instead of pretending a correction landed.
  *     The entry keeps its id + original timestamp (no calendar drift).
  *
  * A "correct" whose `correctId` is null (no prior log in history) or points at a
- * meal no longer in the store (deleted in /meal) safely falls back to APPEND — no
- * ghost update, no silent no-op. Idempotent: a repeated "correct" re-grounds the
- * same entry rather than duplicating it.
+ * meal no longer in the store (deleted in /meal) returns null — no ghost update,
+ * no duplicate append, no false "直しました". Idempotent: a repeated "correct"
+ * re-grounds the same entry rather than duplicating it.
  *
  * FABRICATION SAFETY is unchanged: the meal is built by `buildLoggedMeal`, whose
  * nutrition comes ONLY from the grounded pipeline — never from the model's prose.
@@ -213,9 +394,12 @@ export function applyMealLog(
     now?: Date;
     /** Grounded photo analysis to tighten label/estimate numbers (CHANGE 3). */
     analysis?: ChatMealAnalysis;
+    /** User's latest natural-language turn, used only for deterministic stated portions. */
+    userText?: string;
   },
 ): ApplyMealLogResult | null {
-  const mode = payload.mode ?? "new";
+  const payloadToApply = applyUserStatedMealPortions(payload, opts.userText);
+  const mode = payloadToApply.mode ?? "new";
   // Only a "correct" with a resolvable target updates in place; everything else
   // (new, or correct with no/stale target) appends. This is the over-merge fix:
   // a new meal can NEVER land on the update path.
@@ -224,12 +408,16 @@ export function applyMealLog(
       ? opts.meals.find((m) => m.id === opts.correctId)
       : undefined;
 
+  if (mode === "correct" && !existing) {
+    return null;
+  }
+
   if (existing) {
     // UPDATE in place: re-ground from the new payload, keep the SAME id, and
     // anchor the entry to its original date/timestamp (so a correction doesn't
     // move it on the calendar). photoId falls back to the existing one when this
     // (text-only) turn carried no new photo.
-    const reground = buildLoggedMeal(payload, {
+    const reground = buildLoggedMeal(payloadToApply, {
       id: existing.id,
       date: existing.date,
       photoId: opts.photoId ?? existing.photoId,
@@ -243,11 +431,12 @@ export function applyMealLog(
       meals,
       mealId: updated.id,
       itemCount: updated.nutrition?.items?.length ?? 0,
+      action: "updated",
     };
   }
 
-  // APPEND: a new meal (or a correction with no resolvable target → safe append).
-  const meal = buildLoggedMeal(payload, {
+  // APPEND: a new meal.
+  const meal = buildLoggedMeal(payloadToApply, {
     date: opts.date,
     photoId: opts.photoId,
     now: opts.now,
@@ -258,6 +447,7 @@ export function applyMealLog(
     meals: [...opts.meals, meal],
     mealId: meal.id,
     itemCount: meal.nutrition?.items?.length ?? 0,
+    action: "appended",
   };
 }
 

@@ -92,10 +92,21 @@ const MAX_ITEM_KCAL = 10000;
  * (db, label/estimate, fallback), so the invariant holds for append + correct,
  * single + multi photo + text. Returns the grams and whether a default kicked in.
  */
-function resolveGrams(name: string, rawGrams: number): { grams: number; defaulted: boolean } {
+function resolveGrams(
+  name: string,
+  rawGrams: number,
+  portionBasis?: MealLogItemPayload["portion_basis"],
+): { grams: number; defaulted: boolean } {
   // clampGrams first bounds an absurd/NaN value to a clean number (≤0 → 0); the
   // shared resolver then keeps a positive amount or applies the standard portion.
-  return resolveStandardGrams(name, clampGrams(rawGrams));
+  //
+  // If the coach says the portion came from the shared standard table (or is
+  // simply unknown), do NOT trust a tiny made-up positive number in the block.
+  // Force the shared resolver to apply the app's deterministic standard serving.
+  // User-stated and rough-estimated/visual portions keep their positive grams.
+  const gramsForResolver =
+    portionBasis === "standard" || portionBasis === "unknown" ? 0 : clampGrams(rawGrams);
+  return resolveStandardGrams(name, gramsForResolver);
 }
 
 /** A finite non-negative number ≤ ceil, else null (drops garbage/negatives/absurd). */
@@ -128,7 +139,11 @@ export function groundMealLogItem(payload: MealLogItemPayload): MealItem {
   // grams MATCH the AI-analysis path for the same food. Applies on EVERY branch
   // below, so the invariant holds for db, label/estimate and the fallback alike
   // (and on append + correct via buildLoggedMeal → groundMealLogItems).
-  const { grams, defaulted: portionDefaulted } = resolveGrams(payload.name, payload.grams);
+  const { grams, defaulted: portionDefaulted } = resolveGrams(
+    payload.name,
+    payload.grams,
+    payload.portion_basis,
+  );
   const qty = clampQty(payload.qty ?? 1);
   const source: NutritionSourceKind = payload.source ?? "db";
 

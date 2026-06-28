@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
+  claimsCompletedCorrection,
   claimsCompletedLog,
   reconcileLogClaim,
+  reconcileLogClaimWithFailedCorrection,
   UNSAVED_CLAIM_NOTICE,
 } from "./logClaim";
 
@@ -18,6 +20,16 @@ describe("claimsCompletedLog — flags only COMPLETED-save claims", () => {
     expect(claimsCompletedLog("今日の昼食として登録しましたよ")).toBe(true);
     expect(claimsCompletedLog("カレンダーに反映しておきました。")).toBe(true);
     expect(claimsCompletedLog("もう記録済みです。")).toBe(true);
+    expect(claimsCompletedLog("タンパク質量を修正しました。")).toBe(true);
+    expect(claimsCompletedLog("プロテインの量を直しました。")).toBe(true);
+    expect(claimsCompletedLog("120gから15gに訂正しておきました。")).toBe(true);
+  });
+
+  it("can distinguish correction claims from ordinary save claims", () => {
+    expect(claimsCompletedCorrection("タンパク質量を修正しました。")).toBe(true);
+    expect(claimsCompletedCorrection("プロテインの量を直しました。")).toBe(true);
+    expect(claimsCompletedCorrection("食事に登録しておきました。")).toBe(false);
+    expect(claimsCompletedCorrection("まだ修正できていません。")).toBe(false);
   });
 
   it("does NOT flag honest FUTURE / offer phrasing (no false positive on rally turns)", () => {
@@ -26,6 +38,7 @@ describe("claimsCompletedLog — flags only COMPLETED-save claims", () => {
     expect(claimsCompletedLog("確定したら記録しておきますね。")).toBe(false);
     expect(claimsCompletedLog("食べていたら記録しておきますね。")).toBe(false);
     expect(claimsCompletedLog("これは記録しますか？")).toBe(false);
+    expect(claimsCompletedLog("正しい量が分かったら修正しますね。")).toBe(false);
   });
 
   it("does NOT flag explicitly NEGATED / failed phrasing (already honest)", () => {
@@ -35,6 +48,7 @@ describe("claimsCompletedLog — flags only COMPLETED-save claims", () => {
     expect(claimsCompletedLog("ごめんなさい、まだ記録できませんでした。")).toBe(false);
     expect(claimsCompletedLog("この内容は記録されていません。")).toBe(false);
     expect(claimsCompletedLog("記録に失敗しました。")).toBe(false);
+    expect(claimsCompletedLog("まだ修正できていません。")).toBe(false);
   });
 
   it("ignores empty / non-string / unrelated prose", () => {
@@ -53,6 +67,13 @@ describe("reconcileLogClaim — make a false 'recorded' claim honest", () => {
     expect(out).toContain(UNSAVED_CLAIM_NOTICE);
     // The honest notice tells the user it was NOT saved + asks them to restate.
     expect(out).toContain("まだ記録できていません");
+  });
+
+  it("also corrects a false completed-correction claim when no record was updated", () => {
+    const prose = "プロテインの量を15gに直しました。";
+    const out = reconcileLogClaim(prose, /* recorded */ false);
+    expect(out).toContain(prose);
+    expect(out).toContain(UNSAVED_CLAIM_NOTICE);
   });
 
   it("when a record WAS produced → leave the (true) claim untouched", () => {
@@ -79,5 +100,28 @@ describe("reconcileLogClaim — make a false 'recorded' claim honest", () => {
     expect(reconcileLogClaim(claim, true)).not.toContain(UNSAVED_CLAIM_NOTICE); // claim + recorded → no notice
     expect(reconcileLogClaim(noClaim, false)).not.toContain(UNSAVED_CLAIM_NOTICE); // no claim → no notice
     expect(reconcileLogClaim(noClaim, true)).not.toContain(UNSAVED_CLAIM_NOTICE);
+  });
+
+  it("does not let another successful write validate a failed correction claim", () => {
+    const prose = "食事は記録しました。プロテインの量も15gに直しました。";
+    const out = reconcileLogClaimWithFailedCorrection(
+      prose,
+      /* recorded */ true,
+      /* failedCorrection */ true,
+    );
+
+    expect(out).toContain(prose);
+    expect(out).toContain(UNSAVED_CLAIM_NOTICE);
+  });
+
+  it("keeps a true ordinary save claim when a failed correction was not claimed", () => {
+    const prose = "今日の食事は記録しました。プロテインの量は対象を確認してから直します。";
+    expect(
+      reconcileLogClaimWithFailedCorrection(
+        prose,
+        /* recorded */ true,
+        /* failedCorrection */ true,
+      ),
+    ).toBe(prose);
   });
 });

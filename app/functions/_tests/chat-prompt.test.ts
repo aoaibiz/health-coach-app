@@ -135,6 +135,44 @@ describe("meal auto-log nutrition accuracy protocol", () => {
     expect(AUTO_LOG_PROTOCOL).toContain("一部の具だけを小さくDB化");
     expect(AUTO_LOG_PROTOCOL).toContain('source:"estimate"');
   });
+
+  it("prioritizes user-stated scoop math over guessed protein-powder grams", () => {
+    expect(AUTO_LOG_PROTOCOL).toContain("1杯あたり10g");
+    expect(AUTO_LOG_PROTOCOL).toContain('"grams":10');
+    expect(AUTO_LOG_PROTOCOL).toContain('"qty":1.5');
+    expect(AUTO_LOG_PROTOCOL).toContain("grams:120");
+  });
+
+  it("requires correction requests to emit a correct-mode block before claiming completion", () => {
+    expect(AUTO_LOG_PROTOCOL).toContain("タンパク質が違う");
+    expect(AUTO_LOG_PROTOCOL).toContain('"mode":"correct"');
+    expect(AUTO_LOG_PROTOCOL).toContain("直しました");
+    expect(AUTO_LOG_PROTOCOL).toContain("保存値が変わらない");
+  });
+
+  it("requires trainer-led pushback for obviously abnormal nutrition values", () => {
+    expect(AUTO_LOG_PROTOCOL).toContain("明らかにおかしい値");
+    expect(AUTO_LOG_PROTOCOL).toContain("トレーナーとして");
+    expect(AUTO_LOG_PROTOCOL).toContain("異常値を肯定");
+  });
+
+  it("uses a nutrition evidence hierarchy instead of blindly forcing official DB", () => {
+    expect(AUTO_LOG_PROTOCOL).toContain("栄養根拠の優先順位");
+    expect(AUTO_LOG_PROTOCOL).toContain("ユーザーが明記した分量・栄養表示・商品ラベル");
+    expect(AUTO_LOG_PROTOCOL).toContain("公式DBや標準分量で上書きしてはいけない");
+    expect(AUTO_LOG_PROTOCOL).toContain("外部Web検索を実行できない");
+    expect(AUTO_LOG_PROTOCOL).toContain("検索した/調べたと偽らず");
+  });
+});
+
+describe("elite coach stance is proactive, not passive", () => {
+  it("requires the coach to lead corrections and ask for label/product evidence", () => {
+    expect(COACH_EXPERTISE).toContain("受け身の入力係ではありません");
+    expect(COACH_EXPERTISE).toContain("プロとして先回り");
+    expect(COACH_EXPERTISE).toContain("商品名か栄養表示を見せてください");
+    expect(COACH_EXPERTISE).toContain("標準DBや一般推定で上書きしません");
+    expectSafetyFloorIntact(buildChatPrompt(TURNS));
+  });
 });
 
 describe("WORKOUT_PLAN protocol (chat→運動メニュー提案, AIプランナー 第2陣C)", () => {

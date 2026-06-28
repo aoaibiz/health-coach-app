@@ -32,6 +32,10 @@ import { cleanMicros } from "../../functions/_lib/micros";
 export const MEAL_LOG_OPEN = "«MEAL_LOG»";
 export const MEAL_LOG_CLOSE = "«/MEAL_LOG»";
 
+/** How the portion was chosen. Lets grounding distinguish a user-stated amount
+ *  from a silent standard serving or rough estimate. */
+export type PortionBasis = "stated" | "estimated" | "standard" | "unknown";
+
 /** One item the model asks us to log. Numbers (when present) are CANDIDATE
  *  anchors only — the grounding layer decides what is authoritative. */
 export interface MealLogItemPayload {
@@ -43,6 +47,10 @@ export interface MealLogItemPayload {
   /** The model's source tag. db = standard food (DB authoritative, numbers
    *  ignored); label/estimate = the model's anchor numbers are used + labelled. */
   source?: NutritionSourceKind;
+  /** Whether grams came from the user's stated amount, an estimate, or the shared
+   *  standard portion. When standard/unknown, grounding can apply the app's
+   *  deterministic standard serving instead of trusting a tiny guessed number. */
+  portion_basis?: PortionBasis;
   /** Candidate anchor numbers for label/estimate items (ignored for db). */
   kcal?: number;
   protein_g?: number;
@@ -95,6 +103,10 @@ function isSourceKind(v: unknown): v is NutritionSourceKind {
   return v === "db" || v === "label" || v === "estimate";
 }
 
+function isPortionBasis(v: unknown): v is PortionBasis {
+  return v === "stated" || v === "estimated" || v === "standard" || v === "unknown";
+}
+
 /** Coerce one raw item into a clean MealLogItemPayload, or null if unusable. */
 function toItem(raw: unknown): MealLogItemPayload | null {
   if (typeof raw !== "object" || raw === null) return null;
@@ -113,6 +125,12 @@ function toItem(raw: unknown): MealLogItemPayload | null {
   const qty = num(r.qty);
   if (qty !== undefined && qty > 0) item.qty = qty;
   if (isSourceKind(r.source)) item.source = r.source;
+  const portionBasis = isPortionBasis(r.portion_basis)
+    ? r.portion_basis
+    : isPortionBasis(r.portionBasis)
+      ? r.portionBasis
+      : undefined;
+  if (portionBasis) item.portion_basis = portionBasis;
   // Candidate anchors (label/estimate only; grounding ignores them for db).
   const kcal = num(r.kcal);
   const protein_g = num(r.protein_g);

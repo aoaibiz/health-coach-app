@@ -122,6 +122,19 @@ describe("parseCoachReply — strips the auto-log block, keeps natural prose", (
     });
   });
 
+  it("carries portion_basis through so grounding can distinguish stated vs standard portions", () => {
+    const raw = withBlock({
+      items: [{ name: "鶏むね肉 皮なし", grams: 20, source: "db", portion_basis: "standard" }],
+    });
+    const { payload } = parseCoachReply(raw);
+    expect(payload?.items[0]).toEqual({
+      name: "鶏むね肉 皮なし",
+      grams: 20,
+      source: "db",
+      portion_basis: "standard",
+    });
+  });
+
   it("ignores an invalid meal type", () => {
     const raw = withBlock({ items: [{ name: "卵", grams: 50 }], type: "ブランチ" });
     const { payload } = parseCoachReply(raw);

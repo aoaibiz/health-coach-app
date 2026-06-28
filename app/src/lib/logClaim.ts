@@ -39,13 +39,20 @@
  * an honest "I'll log it once you confirm" rally turn (which correctly carries no
  * block yet).
  */
-const COMPLETED_CLAIM_PATTERNS: RegExp[] = [
+const COMPLETED_SAVE_CLAIM_PATTERNS: RegExp[] = [
   // 記録/登録 + (best-effort おき) + ました/ましたよ/ました！  → "(it) has been recorded/registered"
   /(記録|登録)し(て(おき|あり))?まし(た|たよ)/,
   // 〜を記録／登録済み／済みです
   /(記録|登録)済み/,
   // 反映しておきました / 反映しました（"reflected it into your log"）
   /反映し(て(おき|あり))?まし(た|たよ)/,
+];
+
+const COMPLETED_CORRECTION_CLAIM_PATTERNS: RegExp[] = [
+  // 修正/訂正/変更/直しました — same risk as a save claim: if no structured
+  // block was applied, the stored value did NOT change.
+  /(修正|訂正|変更)し(て(おき|あり))?まし(た|たよ)/,
+  /直し(て(おき|あり))?まし(た|たよ)/,
 ];
 
 /**
@@ -59,9 +66,14 @@ const COMPLETED_CLAIM_PATTERNS: RegExp[] = [
 const HONEST_OR_NEGATED_PATTERNS: RegExp[] = [
   /記録(でき|され|し)て?(い)?ませ(ん|んでした)/, // 記録できません / 記録されていません / 記録していません
   /登録(でき|され|し)て?(い)?ませ(ん|んでした)/,
+  /修正(でき|され|し)て?(い)?ませ(ん|んでした)/,
+  /訂正(でき|され|し)て?(い)?ませ(ん|んでした)/,
+  /変更(でき|され|し)て?(い)?ませ(ん|んでした)/,
+  /直し(て)?(い)?ませ(ん|んでした)/,
   /(記録|登録|反映)(でき|され)ませんでした/,
-  /(記録|登録|反映)に失敗/,
-  /(記録|登録|反映)できなかった/,
+  /(修正|訂正|変更|直すこと)(でき|され)ませんでした/,
+  /(記録|登録|反映|修正|訂正|変更)に失敗/,
+  /(記録|登録|反映|修正|訂正|変更)できなかった/,
 ];
 
 /**
@@ -73,7 +85,16 @@ export function claimsCompletedLog(prose: string): boolean {
   if (typeof prose !== "string" || !prose) return false;
   // An explicitly honest/negated statement is never a false claim.
   if (HONEST_OR_NEGATED_PATTERNS.some((re) => re.test(prose))) return false;
-  return COMPLETED_CLAIM_PATTERNS.some((re) => re.test(prose));
+  return (
+    COMPLETED_SAVE_CLAIM_PATTERNS.some((re) => re.test(prose)) ||
+    COMPLETED_CORRECTION_CLAIM_PATTERNS.some((re) => re.test(prose))
+  );
+}
+
+export function claimsCompletedCorrection(prose: string): boolean {
+  if (typeof prose !== "string" || !prose) return false;
+  if (HONEST_OR_NEGATED_PATTERNS.some((re) => re.test(prose))) return false;
+  return COMPLETED_CORRECTION_CLAIM_PATTERNS.some((re) => re.test(prose));
 }
 
 /**
@@ -84,7 +105,7 @@ export function claimsCompletedLog(prose: string): boolean {
  * UI copy is testable and consistent.
  */
 export const UNSAVED_CLAIM_NOTICE =
-  "（ごめんなさい、システムの都合で今の内容はまだ記録できていません。お手数ですが、記録したい食事や運動の内容（品目と量／種目・回数など）をもう一度教えてください。次のお返事できちんと記録します。）";
+  "（ごめんなさい、システムの都合で今の内容はまだ記録できていません。修正依頼の場合も、保存値はまだ変わっていません。お手数ですが、記録・修正したい食事や運動の内容（品目と量／種目・回数など）をもう一度教えてください。次のお返事できちんと反映します。）";
 
 /**
  * Make a coach reply HONEST when it claimed a completed save that did not happen.
@@ -103,4 +124,14 @@ export function reconcileLogClaim(prose: string, recorded: boolean): string {
   if (!claimsCompletedLog(prose)) return prose; // no false claim → leave as-is.
   const base = typeof prose === "string" ? prose.trim() : "";
   return base ? `${base}\n\n${UNSAVED_CLAIM_NOTICE}` : UNSAVED_CLAIM_NOTICE;
+}
+
+export function reconcileLogClaimWithFailedCorrection(
+  prose: string,
+  recorded: boolean,
+  failedCorrection: boolean,
+): string {
+  const correctionClaimWasNotApplied =
+    failedCorrection && claimsCompletedCorrection(prose);
+  return reconcileLogClaim(prose, correctionClaimWasNotApplied ? false : recorded);
 }
