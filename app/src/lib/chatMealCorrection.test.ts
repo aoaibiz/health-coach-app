@@ -32,7 +32,7 @@ describe("applyDirectMealCorrectionFromText", () => {
 
     const result = applyDirectMealCorrectionFromText(
       "プロテイン、120gじゃなくて1杯あたり10gのすり切り1.5杯です。直して。",
-      { meals: [meal], correctId: meal.id },
+      { meals: [meal], correctId: meal.id, now: new Date("2026-06-28T10:00:00.000Z") },
     );
 
     expect(result).not.toBeNull();
@@ -45,6 +45,7 @@ describe("applyDirectMealCorrectionFromText", () => {
     expect(item?.micros?.calcium).toBe(30);
     expect(item?.micros?.iron).toBe(1.5);
     expect(result!.meals[0].timestamp).toBe(meal.timestamp);
+    expect(result!.meals[0].updatedAt).toBe("2026-06-28T10:00:00.000Z");
     expect(result!.note).toContain("保存データも修正しました");
   });
 
@@ -61,6 +62,22 @@ describe("applyDirectMealCorrectionFromText", () => {
     expect(item?.qty).toBe(1);
     expect(item?.kcal).toBe(60);
     expect(item?.proteinG).toBe(12);
+  });
+
+  it("fixes the saved item before a bad-but-valid LLM correction can keep the old grams", () => {
+    const meal = proteinMeal();
+
+    const result = applyDirectMealCorrectionFromText(
+      "プロテインの量、120gじゃなく15gです。修正して。",
+      { meals: [meal], correctId: meal.id },
+    );
+
+    expect(result).not.toBeNull();
+    const item = result!.meals[0].nutrition?.items?.[0];
+    expect(item?.grams).toBe(15);
+    expect(item?.qty).toBe(1);
+    expect(result!.meals[0].nutrition?.proteinG).toBe(12);
+    expect(result!.meals[0].nutrition?.calories).toBe(60);
   });
 
   it("does not guess when there is no correction intent or corrected amount", () => {

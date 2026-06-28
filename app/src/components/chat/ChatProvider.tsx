@@ -275,6 +275,16 @@ function notifyLocalDataChanged(section: "meals" | "workouts"): void {
   }
 }
 
+function saveMealsFromChat(meals: ReturnType<typeof loadMeals>): void {
+  saveMeals(meals);
+  notifyLocalDataChanged("meals");
+}
+
+function saveWorkoutsFromChat(workouts: ReturnType<typeof loadWorkouts>): void {
+  saveWorkouts(workouts);
+  notifyLocalDataChanged("workouts");
+}
+
 async function deleteMealsFromChat(ids: string[]): Promise<number> {
   const idSet = new Set(ids);
   const current = loadMeals();
@@ -292,8 +302,7 @@ async function deleteMealsFromChat(ids: string[]): Promise<number> {
   }
 
   recordDeletions("meals", targets.map((m) => m.id));
-  saveMeals(current.filter((m) => !idSet.has(m.id)));
-  notifyLocalDataChanged("meals");
+  saveMealsFromChat(current.filter((m) => !idSet.has(m.id)));
   return targets.length;
 }
 
@@ -310,7 +319,7 @@ function deleteWorkoutExercisesFromChat(request: ChatDeleteRequest): number {
     "workouts",
     day.exercises.filter((e) => idSet.has(e.id)).map((e) => e.id),
   );
-  saveWorkouts({
+  saveWorkoutsFromChat({
     ...current,
     [request.date]: {
       ...day,
@@ -318,7 +327,6 @@ function deleteWorkoutExercisesFromChat(request: ChatDeleteRequest): number {
       updatedAt: new Date().toISOString(),
     },
   });
-  notifyLocalDataChanged("workouts");
   return deletedCount;
 }
 
@@ -757,27 +765,48 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         if (mealPayload && mealIsNew && mealDate.ambiguous) {
           ambiguousDate = true;
         } else if (mealPayload) {
-          const applied = applyMealLog(mealPayload, {
-            meals: loadMeals(),
-            correctId: correctMealId,
-            date: mealTargetDate,
-            photoId,
-            // CHANGE 3: tighten label/estimate numbers to the grounded analysis.
-            analysis: mealAnalysis,
-            userText: trimmed,
-          });
-          if (applied) {
-            // Fill DB-miss (no-number 推定値) items with a real labelled AI estimate
-            // at log-time, so a chat-logged food the official DB can't match
-            // (カツオのタタキ / プロテイン) shows honest 推定値 numbers instead of 0 —
-            // mirroring the /meal editor's auto-estimate. Anti-fabrication preserved
-            // (numbers come from the shared analysis path; no key/offline → kept as-is).
-            const enriched = await estimateLoggedMeal(applied.meals, applied.mealId);
-            saveMeals(enriched);
-            loggedMeal = { mealId: applied.mealId, itemCount: applied.itemCount };
-            if (mealTargetDate) backdatedDates.add(mealTargetDate);
-          } else if ((mealPayload.mode ?? "new") === "correct") {
-            failedMealCorrection = true;
+          const mealMode = mealPayload.mode ?? "new";
+          // If the user's correction text itself is deterministic (e.g.
+          // "プロテインは120gじゃなく15g" / "1杯10gを1.5杯"), trust that over the
+          // LLM's structured block. Otherwise a bad block can still be "valid" and
+          // overwrite the saved item with the old wrong number while claiming success.
+          const directBeforePayload =
+            mealMode === "correct"
+              ? applyDirectMealCorrectionFromText(trimmed, {
+                  meals: loadMeals(),
+                  correctId: correctMealId,
+                })
+              : null;
+          if (directBeforePayload) {
+            saveMealsFromChat(directBeforePayload.meals);
+            loggedMeal = {
+              mealId: directBeforePayload.mealId,
+              itemCount: directBeforePayload.itemCount,
+            };
+            directMealCorrectionNote = directBeforePayload.note;
+          } else {
+            const applied = applyMealLog(mealPayload, {
+              meals: loadMeals(),
+              correctId: correctMealId,
+              date: mealTargetDate,
+              photoId,
+              // CHANGE 3: tighten label/estimate numbers to the grounded analysis.
+              analysis: mealAnalysis,
+              userText: trimmed,
+            });
+            if (applied) {
+              // Fill DB-miss (no-number 推定値) items with a real labelled AI estimate
+              // at log-time, so a chat-logged food the official DB can't match
+              // (カツオのタタキ / プロテイン) shows honest 推定値 numbers instead of 0 —
+              // mirroring the /meal editor's auto-estimate. Anti-fabrication preserved
+              // (numbers come from the shared analysis path; no key/offline → kept as-is).
+              const enriched = await estimateLoggedMeal(applied.meals, applied.mealId);
+              saveMealsFromChat(enriched);
+              loggedMeal = { mealId: applied.mealId, itemCount: applied.itemCount };
+              if (mealTargetDate) backdatedDates.add(mealTargetDate);
+            } else if (mealMode === "correct") {
+              failedMealCorrection = true;
+            }
           }
         }
         if (!loggedMeal && (!mealPayload || failedMealCorrection)) {
@@ -786,7 +815,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             correctId: correctMealId,
           });
           if (directCorrection) {
-            saveMeals(directCorrection.meals);
+            saveMealsFromChat(directCorrection.meals);
             loggedMeal = {
               mealId: directCorrection.mealId,
               itemCount: directCorrection.itemCount,
@@ -809,7 +838,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             date: workoutTargetDate,
           });
           if (applied) {
-            saveWorkouts(applied.workouts);
+            saveWorkoutsFromChat(applied.workouts);
             loggedWorkout = {
               exerciseIds: applied.exerciseIds,
               date: applied.date,
@@ -835,7 +864,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             correctIds: correctPlannedIds,
           });
           if (applied) {
-            saveWorkouts(applied.workouts);
+            saveWorkoutsFromChat(applied.workouts);
             plannedWorkout = {
               exerciseIds: applied.exerciseIds,
               date: applied.date,
@@ -865,7 +894,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             correctIds: correctPlannedMealIds,
           });
           if (applied) {
-            saveMeals(applied.meals);
+            saveMealsFromChat(applied.meals);
             plannedMeal = {
               mealIds: applied.mealIds,
               date: applied.date,

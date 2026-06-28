@@ -830,6 +830,7 @@ describe("applyMealLog — explicit mode (new/correct) + history resolution (de-
     const t0 = new Date("2026-06-17T20:05:00.000Z");
     const first = applyMealLog(ricePayload, { meals: [], correctId: null, now: t0 })!;
     const ts = first.meals[0].timestamp;
+    expect(first.meals[0].updatedAt).toBe("2026-06-17T20:05:00.000Z");
     const t1 = new Date("2026-06-17T20:09:00.000Z");
     const second = applyMealLog(
       { ...ricePayload, mode: "correct" },
@@ -837,6 +838,7 @@ describe("applyMealLog — explicit mode (new/correct) + history resolution (de-
     )!;
     expect(second.meals).toHaveLength(1);
     expect(second.meals[0].timestamp).toBe(ts); // not drifted to 20:09
+    expect(second.meals[0].updatedAt).toBe("2026-06-17T20:09:00.000Z");
   });
 
   it("if the meal was deleted in /meal, a correct logs NOTHING (no ghost update or duplicate)", () => {

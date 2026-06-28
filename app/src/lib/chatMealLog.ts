@@ -339,6 +339,7 @@ export function buildLoggedMeal(
     id: opts.id ?? makeId(),
     date,
     timestamp: date === toDateKey() ? now.toISOString() : `${date}T12:00:00.000Z`,
+    updatedAt: now.toISOString(),
     type,
     text: items.map((i) => i.name).join("、"),
     photoId: opts.photoId,

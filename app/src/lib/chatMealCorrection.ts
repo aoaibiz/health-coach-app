@@ -108,11 +108,17 @@ function chooseItem(
   return null;
 }
 
-function replaceMealItem(meal: Meal, target: MealItem, nextItem: MealItem): Meal {
+function replaceMealItem(
+  meal: Meal,
+  target: MealItem,
+  nextItem: MealItem,
+  now: Date,
+): Meal {
   const currentItems = meal.nutrition?.items ?? [];
   const nextItems = currentItems.map((item) => (item.id === target.id ? nextItem : item));
   return {
     ...meal,
+    updatedAt: now.toISOString(),
     text: nextItems.map((item) => item.name).join("、"),
     nutrition: itemsToNutrition(nextItems, {
       source: meal.nutrition?.source,
@@ -135,7 +141,7 @@ function formatAmount(item: MealItem): string {
  */
 export function applyDirectMealCorrectionFromText(
   userText: string,
-  opts: { meals: Meal[]; correctId?: string | null },
+  opts: { meals: Meal[]; correctId?: string | null; now?: Date },
 ): DirectMealCorrectionResult | null {
   const text = userText.trim();
   if (!text) return null;
@@ -154,7 +160,7 @@ export function applyDirectMealCorrectionFromText(
   const corrected = scoop
     ? setItemQty(setItemGrams(target, scoop.gramsPerUnit), scoop.qty)
     : setItemQty(setItemGrams(target, totalGrams ?? effectiveGrams(target)), 1);
-  const nextMeal = replaceMealItem(meal, target, corrected);
+  const nextMeal = replaceMealItem(meal, target, corrected, opts.now ?? new Date());
   const meals = opts.meals.map((m) => (m.id === meal.id ? nextMeal : m));
 
   return {
