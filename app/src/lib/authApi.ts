@@ -201,6 +201,10 @@ export interface CalendarStatus {
   connected: boolean;
   scopeOk: boolean;
   configured: boolean;
+  /** True when a stale/incomplete token row exists and the user should reconnect. */
+  needsReconnect: boolean;
+  /** Stable reconnect reason from the Worker, or null when no reconnect is needed. */
+  reason: "missing_scope" | "missing_refresh_token" | null;
   /** The connected Google account email (may differ from the login account). */
   email: string | null;
 }
@@ -217,6 +221,11 @@ export async function calendarStatus(opts?: FetchOption): Promise<CalendarStatus
     connected: d.connected === true,
     scopeOk: d.scopeOk === true,
     configured: d.configured === true,
+    needsReconnect: d.needsReconnect === true,
+    reason:
+      d.reason === "missing_scope" || d.reason === "missing_refresh_token"
+        ? d.reason
+        : null,
     email: typeof d.email === "string" ? d.email : null,
   };
 }
@@ -232,7 +241,7 @@ export interface CalendarPlanItemBody {
 
 export interface CalendarPlanResult {
   created: { title: string; id: string; htmlLink?: string }[];
-  failed: { title: string; reason: string }[];
+  failed: { title: string; reason: string; detail?: string }[];
   /** True when the grant died mid-batch (some created, then reconnect needed). */
   partial?: boolean;
   /** True when the API said the user isn't connected (UI prompts to connect). */
@@ -339,11 +348,15 @@ export async function calendarToday(
 export async function calendarDisconnect(csrfToken: string | null, opts?: FetchOption): Promise<void> {
   const headers: Record<string, string> = {};
   if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
-  await pickFetch(opts)(apiUrl("/api/calendar/disconnect"), {
+  const res = await pickFetch(opts)(apiUrl("/api/calendar/disconnect"), {
     method: "POST",
     credentials: "include",
     headers,
   });
+  const data = await safeJson(res);
+  if (!res.ok) {
+    throw new AuthApiError(res.status, messageOf(data, "カレンダー連携の解除に失敗しました"));
+  }
 }
 
 // ---- Web Push (Stage: notifications) ---------------------------------------

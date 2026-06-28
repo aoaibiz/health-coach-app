@@ -39,7 +39,14 @@ export function CalendarSettingsCard() {
       setStatus(s);
     } catch {
       // Treat a status error as "unavailable" rather than blocking the page.
-      setStatus({ connected: false, scopeOk: false, configured: false, email: null });
+      setStatus({
+        connected: false,
+        scopeOk: false,
+        configured: false,
+        needsReconnect: false,
+        reason: null,
+        email: null,
+      });
     }
   }, []);
 
@@ -106,13 +113,20 @@ export function CalendarSettingsCard() {
       )}
 
       {status && status.configured && !status.connected && (
-        <button
-          type="button"
-          onClick={handleConnect}
-          className="btn-primary w-full py-3"
-        >
-          Googleカレンダーと連携する
-        </button>
+        <div className="space-y-3">
+          {status.needsReconnect && (
+            <p className="rounded-xl bg-amber-50 px-3 py-2.5 text-sm leading-relaxed text-amber-700 dark:bg-amber-400/10 dark:text-amber-200">
+              カレンダー連携は残っていますが、予定登録に必要な権限か更新トークンが不足しています。もう一度連携してください。
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={handleConnect}
+            className="btn-primary w-full py-3"
+          >
+            {status.needsReconnect ? "Googleカレンダーを再連携する" : "Googleカレンダーと連携する"}
+          </button>
+        </div>
       )}
 
       {status && status.configured && status.connected && (

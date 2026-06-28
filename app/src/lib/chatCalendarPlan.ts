@@ -12,6 +12,7 @@
 // PURE of React; the provider calls it inside the send() flow.
 
 import {
+  AuthApiError,
   calendarPlan,
   type CalendarPlanItemBody,
   type CalendarPlanResult,
@@ -36,6 +37,62 @@ export interface CalendarPlanOutcome {
   notConnected: boolean;
   /** How many events were actually created. */
   createdCount: number;
+}
+
+const NOT_CONNECTED_NOTE =
+  "（Googleカレンダーが未連携、または再連携が必要な状態のため、予定は登録できませんでした。マイページの「カレンダー連携」から連携し直すと、次回から登録できます。）";
+
+const WRITE_FORBIDDEN_NOTE =
+  "（Googleカレンダーへの書き込みが拒否されました。マイページの「カレンダー連携」から再連携し、Google側の権限を許可してください。職場アカウントの場合は管理者ポリシーで拒否されている可能性があります。）";
+
+function failedReasonNote(failed: CalendarPlanResult["failed"]): string {
+  const reasons = new Set(failed.map((f) => f.reason));
+  if (reasons.has("forbidden")) return WRITE_FORBIDDEN_NOTE;
+  if (reasons.has("calendar_not_connected")) {
+    return "（途中でカレンダー連携が切れました。マイページの「カレンダー連携」から再連携してください。）";
+  }
+  return "（Googleカレンダー側で予定を作成できませんでした。時刻やタイトルを確認して、もう一度お試しください。）";
+}
+
+function errorNote(error: unknown): CalendarPlanOutcome {
+  if (error instanceof AuthApiError) {
+    if (error.status === 401 || (error.status === 403 && /セッション|CSRF/i.test(error.message))) {
+      return {
+        note: "（ログイン状態の確認に失敗したため、カレンダーへ登録できませんでした。ページを再読み込みし、必要ならログインし直してください。）",
+        notConnected: false,
+        createdCount: 0,
+      };
+    }
+    if (error.status === 403) {
+      return { note: WRITE_FORBIDDEN_NOTE, notConnected: false, createdCount: 0 };
+    }
+    if (error.status === 429) {
+      return {
+        note: "（短時間にカレンダー登録が重なったため停止しました。少し時間をおいてもう一度お試しください。）",
+        notConnected: false,
+        createdCount: 0,
+      };
+    }
+    if (error.status === 400) {
+      return {
+        note: "（カレンダー登録内容の時刻かタイトルが不正でした。開始・終了時刻を指定してもう一度お試しください。）",
+        notConnected: false,
+        createdCount: 0,
+      };
+    }
+    if (error.status === 502 || error.status >= 500) {
+      return {
+        note: "（Googleカレンダー側の応答エラーで登録できませんでした。少し時間をおいてもう一度お試しください。）",
+        notConnected: false,
+        createdCount: 0,
+      };
+    }
+  }
+  return {
+    note: "（カレンダーへの登録時にエラーが発生しました。少し時間をおいてもう一度お試しください。）",
+    notConnected: false,
+    createdCount: 0,
+  };
 }
 
 /**
@@ -65,17 +122,13 @@ export async function runCalendarPlan(
       getSyncCsrfToken(),
       opts?.fetchImpl ? { fetchImpl: opts.fetchImpl } : undefined,
     );
-  } catch {
-    return {
-      note: "（カレンダーへの登録時にエラーが発生しました。少し時間をおいてもう一度お試しください。）",
-      notConnected: false,
-      createdCount: 0,
-    };
+  } catch (error) {
+    return errorNote(error);
   }
 
   if (result.notConnected) {
     return {
-      note: "（Googleカレンダーがまだ連携されていないため、予定は登録できませんでした。マイページの「カレンダー連携」から連携すると、次回から登録できます。）",
+      note: NOT_CONNECTED_NOTE,
       notConnected: true,
       createdCount: 0,
     };
@@ -95,12 +148,12 @@ export async function runCalendarPlan(
   }
   if (failedCount > 0 && createdCount === 0) {
     return {
-      note: "（カレンダーへの登録に失敗しました。少し時間をおいてもう一度お試しください。）",
+      note: failedReasonNote(result.failed),
       notConnected: false,
       createdCount: 0,
     };
   }
-  const failTail = failedCount > 0 ? `（${failedCount}件は登録できませんでした）` : "";
+  const failTail = failedCount > 0 ? ` ${failedCount}件は登録できませんでした。` : "";
   return {
     note: `（Googleカレンダーに${createdCount}件の予定を登録しました。${failTail}）`,
     notConnected: false,

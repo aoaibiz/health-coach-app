@@ -6,7 +6,10 @@ import {
   fetchMe,
   logout,
   googleStartUrl,
+  calendarStatus,
+  calendarPlan,
   calendarToday,
+  calendarDisconnect,
   AuthApiError,
 } from "./authApi";
 
@@ -243,6 +246,96 @@ describe("authApi — calendarToday (READ existing events, day-planner)", () => 
     await expect(
       calendarToday(undefined, { fetchImpl: fakeFetch(502, { message: "読み取れません" }) }),
     ).rejects.toMatchObject({ name: "AuthApiError", status: 502 });
+  });
+});
+
+describe("authApi — calendar status + plan writes", () => {
+  it("maps reconnect-needed calendar status instead of treating a stale row as connected", async () => {
+    const res = await calendarStatus({
+      fetchImpl: fakeFetch(200, {
+        connected: false,
+        scopeOk: false,
+        configured: true,
+        needsReconnect: true,
+        reason: "missing_scope",
+        email: "work-calendar@example.com",
+      }),
+    });
+    expect(res).toEqual({
+      connected: false,
+      scopeOk: false,
+      configured: true,
+      needsReconnect: true,
+      reason: "missing_scope",
+      email: "work-calendar@example.com",
+    });
+  });
+
+  it("POSTs calendar plans with credentials + CSRF and maps 409 to notConnected", async () => {
+    const cap: { url?: string; init?: RequestInit } = {};
+    const res = await calendarPlan(
+      {
+        timeZone: "Asia/Tokyo",
+        items: [
+          {
+            type: "トレーニング",
+            title: "筋トレ",
+            start: "2026-06-28T18:00:00+09:00",
+            end: "2026-06-28T18:45:00+09:00",
+          },
+        ],
+      },
+      "csrf-123",
+      { fetchImpl: fakeFetch(409, { error: "calendar_not_connected" }, cap) },
+    );
+    expect(cap.url).toBe("https://health-api.mogubusi.trade/api/calendar/plan");
+    expect(cap.init?.method).toBe("POST");
+    expect(cap.init?.credentials).toBe("include");
+    expect((cap.init?.headers as Record<string, string>)["X-CSRF-Token"]).toBe("csrf-123");
+    expect(res.notConnected).toBe(true);
+  });
+
+  it("surfaces the Worker write-forbidden message on calendar plan failures", async () => {
+    await expect(
+      calendarPlan(
+        {
+          items: [
+            {
+              type: "トレーニング",
+              title: "筋トレ",
+              start: "2026-06-28T18:00:00+09:00",
+              end: "2026-06-28T18:45:00+09:00",
+            },
+          ],
+        },
+        "csrf-123",
+        {
+          fetchImpl: fakeFetch(403, {
+            error: "calendar_write_forbidden",
+            message: "Googleカレンダーへの書き込みが拒否されました。",
+          }),
+        },
+      ),
+    ).rejects.toMatchObject({
+      name: "AuthApiError",
+      status: 403,
+      message: "Googleカレンダーへの書き込みが拒否されました。",
+    });
+  });
+
+  it("throws on calendar disconnect failure instead of pretending unlink succeeded", async () => {
+    await expect(
+      calendarDisconnect("csrf-123", {
+        fetchImpl: fakeFetch(403, {
+          error: "csrf_failed",
+          message: "セッションの検証に失敗しました",
+        }),
+      }),
+    ).rejects.toMatchObject({
+      name: "AuthApiError",
+      status: 403,
+      message: "セッションの検証に失敗しました",
+    });
   });
 });
 
