@@ -221,22 +221,29 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {/* Header — in-flow row above the scroll region; stays visible as a sibling.
           Hidden on desktop where the sidebar carries the brand + actions. */}
       <header className="shrink-0 border-b border-slate-200/60 bg-white/70 backdrop-blur-xl lg:hidden dark:border-navy-800/70 dark:bg-navy-950/70">
-        <div className="flex h-14 items-center justify-between px-5">
-          <span className="flex items-center gap-2 text-lg font-bold tracking-tight">
+        <div className="flex h-14 items-center justify-between gap-2 px-5">
+          <span className="flex shrink-0 items-center gap-2 text-lg font-bold tracking-tight">
             <BrandMark />
             Health
           </span>
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2">
+            {/* ログイン中のアカウント（メール）を常に表示 — どの端末でもどのアカウントで
+                使っているか一目で分かるようにし、別アカウントへの取り違えを防ぐ。タップで
+                プロフィールへ。email が無い／未ログインのときはアイコンのみ（捏造しない）。 */}
             <Link
               href="/profile"
-              aria-label="プロフィール"
-              className={`flex h-9 w-9 items-center justify-center rounded-full border transition active:scale-95 ${
+              aria-label={email ? `プロフィール（ログイン中: ${email}）` : "プロフィール"}
+              title={email || undefined}
+              className={`flex min-w-0 items-center gap-1.5 rounded-full border transition active:scale-95 ${
+                email ? "max-w-[9.5rem] px-2.5 py-1.5" : "h-9 w-9 justify-center"
+              } ${
                 pathname.startsWith("/profile")
                   ? "border-accent bg-accent/10 text-accent dark:border-accent-light dark:bg-accent-light/15 dark:text-accent-light"
                   : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-navy-700 dark:bg-navy-800 dark:text-navy-100 dark:hover:bg-navy-700"
               }`}
             >
-              <UserIcon className="h-5 w-5" />
+              <UserIcon className="h-5 w-5 shrink-0" />
+              {email && <span className="truncate text-xs font-semibold">{email}</span>}
             </Link>
             <ThemeToggle />
           </div>

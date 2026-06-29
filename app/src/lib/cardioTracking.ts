@@ -68,6 +68,12 @@ export interface TrackStats {
   /** Wall-clock seconds from first to last kept point (point-based; the page
    *  uses its own start-button wall clock for the live timer). */
   durationSec: number;
+  /** Seconds spent ACTUALLY MOVING — the summed time of the consecutive
+   *  point-intervals that contributed real distance (same stop/drift gating as
+   *  distanceM: GPS-speed below minMovingKmh, or staying inside the drift radius,
+   *  never counts). Standing-still / GPS-drift intervals are excluded, so pace and
+   *  average speed computed over movingSec do NOT degrade while the user stops. */
+  movingSec: number;
   /** Number of points that passed the accuracy filter. */
   keptPoints: number;
 }
@@ -86,9 +92,10 @@ export function trackStats(points: GeoPoint[], opts: TrackOptions = {}): TrackSt
   const o = { ...DEFAULT_TRACK_OPTS, ...opts };
   const kept = points.filter((p) => (p.accuracy ?? 0) <= o.maxAccuracyM);
   if (kept.length < 2) {
-    return { distanceM: 0, durationSec: 0, keptPoints: kept.length };
+    return { distanceM: 0, durationSec: 0, movingSec: 0, keptPoints: kept.length };
   }
   let distanceM = 0;
+  let movingSec = 0;
   let anchor = kept[0];
   for (let i = 1; i < kept.length; i++) {
     const p = kept[i];
@@ -108,10 +115,16 @@ export function trackStats(points: GeoPoint[], opts: TrackOptions = {}): TrackSt
       continue;
     }
     distanceM += d;
+    // This step is REAL movement (it cleared every stop/drift/teleport gate), so
+    // credit the time since the previous KEPT point to moving time. Standing-still
+    // and drift intervals are skipped above (continue) and never reach here, so
+    // they never inflate movingSec — that is what keeps pace/speed stable when the
+    // user stops, instead of degrading as wall-clock elapsed keeps growing.
+    movingSec += Math.max(0, (p.t - kept[i - 1].t) / 1000);
     anchor = p;
   }
   const durationSec = Math.max(0, (kept[kept.length - 1].t - kept[0].t) / 1000);
-  return { distanceM, durationSec, keptPoints: kept.length };
+  return { distanceM, durationSec, movingSec, keptPoints: kept.length };
 }
 
 /** Average speed (km/h) for a distance/time; 0 when time is non-positive. */

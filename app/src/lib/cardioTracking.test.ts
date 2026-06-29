@@ -136,6 +136,54 @@ describe("trackStats", () => {
     ];
     expect(trackStats(pts).distanceM).toBeGreaterThan(108);
   });
+
+  it("movingSec EXCLUDES a standing-still gap → pace stays stable when you stop", () => {
+    // Regression for the "止まるとペースがむしろ上がる" bug: pace/speed must be over
+    // MOVING time, not wall-clock elapsed. Here the user walks for 60 s, then stands
+    // still (same spot, GPS speed ≈ 0) for another 60 s while the clock runs to 120 s.
+    const sp = (lat: number, lng: number, tSec: number, speed: number): GeoPoint => ({
+      lat,
+      lng,
+      t: tSec * 1000,
+      accuracy: 8,
+      speed,
+    });
+    // Phase 1 — walk north ~5 km/h (1.4 m/s) for 60 s (~83 m of real movement).
+    const moving = [
+      sp(35.0, 139.0, 0, 1.4),
+      sp(35.00025, 139.0, 20, 1.4),
+      sp(35.0005, 139.0, 40, 1.4),
+      sp(35.00075, 139.0, 60, 1.4),
+    ];
+    const a = trackStats(moving);
+    expect(a.movingSec).toBeGreaterThan(55);
+    expect(a.movingSec).toBeLessThan(65); // ≈ 60 s of moving
+    const paceMoving = paceMinPerKm(a.distanceM, a.movingSec);
+    expect(paceMoving).not.toBe(""); // a real pace was produced
+
+    // Phase 2 — STAND STILL at the same spot for 60 s more (speed ≈ 0). Wall clock
+    // advances to 120 s; distance and movingSec must NOT.
+    const withIdle = [
+      ...moving,
+      sp(35.00075, 139.0, 80, 0.0),
+      sp(35.00075, 139.0, 100, 0.05),
+      sp(35.00075, 139.0, 120, 0.0),
+    ];
+    const b = trackStats(withIdle);
+
+    // movingSec did NOT grow during the idle (still ≈ 60, NOT ≈ 120).
+    expect(b.movingSec).toBeGreaterThan(55);
+    expect(b.movingSec).toBeLessThan(65);
+    // Distance is unchanged across the idle (no movement was added).
+    expect(b.distanceM).toBeCloseTo(a.distanceM, 6);
+    // durationSec (point span) DID grow to ~120 s — proving wall time advanced...
+    expect(b.durationSec).toBe(120);
+    // ...yet pace over movingSec is IDENTICAL across the idle (does NOT climb/worsen).
+    expect(paceMinPerKm(b.distanceM, b.movingSec)).toBe(paceMoving);
+    // And the OLD (buggy) pace over total elapsed WOULD have degraded — proof the
+    // moving-time denominator is what fixes it.
+    expect(paceMinPerKm(b.distanceM, b.durationSec)).not.toBe(paceMoving);
+  });
 });
 
 describe("avgSpeedKmh", () => {

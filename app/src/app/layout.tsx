@@ -5,6 +5,7 @@ import { SelectedDateProvider } from "@/components/SelectedDateProvider";
 import { ChatProvider } from "@/components/chat/ChatProvider";
 import { AuthProvider } from "@/components/auth/AuthProvider";
 import { AuthGate } from "@/components/auth/AuthGate";
+import { SyncErrorToast } from "@/components/SyncErrorToast";
 
 export const metadata: Metadata = {
   title: "Health",
@@ -69,6 +70,11 @@ export default function RootLayout({
               </SelectedDateProvider>
             </AuthGate>
           </AuthProvider>
+          {/* Global, transient notice when a save was REJECTED by the server and
+              could not sync (e.g. data over the size cap). Mounted outside the auth
+              gate so it can surface on any screen; the push layer only fires it for
+              non-retryable failures, so it never nags on a flaky connection. */}
+          <SyncErrorToast />
         </ThemeProvider>
       </body>
     </html>

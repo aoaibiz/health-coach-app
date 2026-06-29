@@ -3,12 +3,19 @@ import {
   hasFreshGeneratedMealImage,
   MEAL_IMAGE_PROMPT_MAX_CHARS,
   MEALS_GENERATED_IMAGE_SYNC_MAX_COUNT,
+  MEALS_SYNC_MAX_JSON_BYTES,
   mealImagePromptText,
   pruneGeneratedMealImageDataUrls,
   resolveMealCardImage,
   structuredMealImagePromptText,
 } from "./mealCardImage";
 import type { Meal } from "./types";
+
+/** UTF-8 byte length of a value's JSON form — the SAME unit the server cap and
+ *  the prune budget use (NOT UTF-16 char count). */
+function jsonByteLength(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
 
 function meal(overrides: Partial<Meal>): Meal {
   return {
@@ -210,5 +217,88 @@ describe("pruneGeneratedMealImageDataUrls", () => {
     expect(pruned.at(-1)?.generatedImageDataUrl).toBe(
       `data:image/webp;base64,IMG${MEALS_GENERATED_IMAGE_SYNC_MAX_COUNT + 1}`,
     );
+  });
+
+  it("prunes the synced blob under the server BYTE cap (≈prod: 61 meals, 9 inline images)", () => {
+    // Mirrors the CONFIRMED prod blob: 253,359 B, 61 meals, 9 carrying an inline
+    // generatedImageDataUrl. Base meal bulk (text/nutrition) is padded so the base
+    // alone is ~realistic and the inline images push the blob over the byte cap.
+    const inlineImage = "data:image/webp;base64," + "A".repeat(12_800); // ~12.8 KB each
+    const meals: Meal[] = Array.from({ length: 61 }, (_, index) => {
+      const base = meal({
+        id: `meal-${index}`,
+        // oldest-first ids; spread timestamps so newest-first stripping is well-defined.
+        timestamp: `2026-06-27T${String(index % 24).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}:00.000Z`,
+        text: `padded-meal-${index}-` + "x".repeat(2_200), // ~2.2 KB base per meal
+      });
+      // The 9 NEWEST meals (52..60) carry an inline generated-card image.
+      if (index >= 52) {
+        return {
+          ...base,
+          generatedImageId: `gen-${index}`,
+          generatedImagePrompt: "鶏むね肉のグリル",
+          generatedImageDataUrl: inlineImage,
+        };
+      }
+      return base;
+    });
+
+    const before = jsonByteLength(meals);
+    // Sanity: the unpruned scenario genuinely exceeds the budget (else the test
+    // would pass vacuously).
+    expect(before).toBeGreaterThan(MEALS_SYNC_MAX_JSON_BYTES);
+
+    const pruned = pruneGeneratedMealImageDataUrls(meals);
+
+    // THE fix: the pruned blob fits under the byte budget → the validated PUT
+    // (server cap 262,144 B) always succeeds → meals sync.
+    expect(jsonByteLength(pruned)).toBeLessThanOrEqual(MEALS_SYNC_MAX_JSON_BYTES);
+    expect(MEALS_SYNC_MAX_JSON_BYTES).toBeLessThan(256 * 1024); // < server cap.
+
+    // ZERO meal loss: every record survives, and only inline base64 bytes are
+    // dropped — text/timestamp/type and the regenerable image refs are preserved.
+    expect(pruned).toHaveLength(61);
+    for (let i = 0; i < pruned.length; i++) {
+      expect(pruned[i].id).toBe(meals[i].id);
+      expect(pruned[i].text).toBe(meals[i].text);
+      expect(pruned[i].timestamp).toBe(meals[i].timestamp);
+      if (i >= 52) {
+        // image refs kept (viewable same-device + regenerable) even if the heavy
+        // inline data URL was stripped to fit the budget.
+        expect(pruned[i].generatedImageId).toBe(`gen-${i}`);
+        expect(pruned[i].generatedImagePrompt).toBe("鶏むね肉のグリル");
+      }
+    }
+  });
+
+  it("strips the OLDEST inline images first via the BYTE loop (count under the COUNT cap)", () => {
+    // 8 meals (< MEALS_GENERATED_IMAGE_SYNC_MAX_COUNT) so the COUNT cap keeps all of
+    // them — the BYTE loop is the ONLY gate. 8 × ~40 KB ≫ the byte budget.
+    const bigImage = "data:image/webp;base64," + "A".repeat(40_000);
+    const meals: Meal[] = Array.from({ length: 8 }, (_, index) =>
+      meal({
+        id: `m-${index}`,
+        timestamp: `2026-06-27T0${index}:00:00.000Z`,
+        generatedImageId: `gen-${index}`,
+        generatedImagePrompt: "ブラックコーヒー",
+        generatedImageDataUrl: bigImage,
+      }),
+    );
+
+    const pruned = pruneGeneratedMealImageDataUrls(meals);
+
+    expect(jsonByteLength(pruned)).toBeLessThanOrEqual(MEALS_SYNC_MAX_JSON_BYTES);
+    expect(pruned).toHaveLength(8); // no meal lost.
+
+    const withImage = pruned.filter((m) => m.generatedImageDataUrl);
+    expect(withImage.length).toBeGreaterThan(0); // newest images kept.
+    expect(withImage.length).toBeLessThan(8); // some oldest stripped.
+
+    // OLDEST (m-0) is stripped first but KEEPS id + prompt (viewable + regenerable).
+    expect(pruned[0].generatedImageDataUrl).toBeUndefined();
+    expect(pruned[0].generatedImageId).toBe("gen-0");
+    expect(pruned[0].generatedImagePrompt).toBe("ブラックコーヒー");
+    // NEWEST (m-7) keeps its inline image.
+    expect(pruned.at(-1)?.generatedImageDataUrl).toBe(bigImage);
   });
 });

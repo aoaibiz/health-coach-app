@@ -48,8 +48,13 @@ export default function CardioPage() {
     phase === "idle" || startMs.current === 0
       ? 0
       : Math.max(0, ((endMs ?? Date.now()) - startMs.current) / 1000);
-  const distanceM = trackStats(points).distanceM;
-  const speed = avgSpeedKmh(distanceM, elapsedSec);
+  // Pace + average speed are computed over MOVING time (movingSec), NOT the
+  // wall-clock elapsed: standing still adds idle seconds but no distance, so an
+  // elapsed-based pace would climb (degrade) while stopped. Over movingSec they
+  // FREEZE at the moving average instead. The mm:ss timer and the calorie burn
+  // keep using elapsedSec (the real session duration).
+  const { distanceM, movingSec } = trackStats(points);
+  const speed = avgSpeedKmh(distanceM, movingSec);
   const activity = CARDIO_ACTIVITIES[selected];
   const durationMinExact = elapsedSec / 60;
   const weightKg = profile?.weightKg ?? 0;
@@ -223,7 +228,7 @@ export default function CardioPage() {
         <div className="mb-4 grid grid-cols-2 gap-3">
           <Stat label="距離" value={formatKm(distanceM)} />
           <Stat label="時間" value={`${mm}:${ss}`} />
-          <Stat label="ペース" value={paceMinPerKm(distanceM, elapsedSec) || "—"} />
+          <Stat label="ペース" value={paceMinPerKm(distanceM, movingSec) || "—"} />
           <Stat label="消費カロリー(推定)" value={kcal != null ? `${kcal} kcal` : "体重未設定"} />
         </div>
         {phase === "tracking" && (

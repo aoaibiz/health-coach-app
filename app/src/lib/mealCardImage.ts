@@ -3,7 +3,18 @@ import { isValidGeneratedMealImageDataUrl } from "./image";
 
 export const MEAL_IMAGE_PROMPT_MAX_CHARS = 80;
 export const MEALS_GENERATED_IMAGE_SYNC_MAX_COUNT = 12;
-export const MEALS_SYNC_MAX_JSON_CHARS = 900_000;
+// Keep the synced meals blob safely UNDER the server's per-section size cap. The
+// Worker (health-app-api validate.ts) rejects a section PUT with HTTP 400 when the
+// blob's UTF-8 BYTE length exceeds MAX_DATA_BLOB_BYTES = 256*1024 (262,144 B). The
+// prune budget MUST therefore be measured in BYTES on the same scale and sit well
+// below that cap so a pruned blob always fits.
+//
+// (Bug fix: this was a 900,000-CHAR budget measured with String.length [UTF-16
+// units]. 900k chars ≫ 262k bytes, so the prune effectively NEVER triggered before
+// the server byte cap was hit — the meals blob grew with inline generatedImageDataUrl
+// base64 until a save crossed 262,144 B, the PUT 400'd, and the failure was swallowed
+// → meals silently stopped syncing across devices.)
+export const MEALS_SYNC_MAX_JSON_BYTES = 240 * 1024; // 245,760 B < 262,144 B server cap
 
 export interface MealCardImagePlan {
   hasUserPhoto: boolean;
@@ -97,6 +108,13 @@ function stripGeneratedImageSyncFields(meal: Meal): Meal {
   };
 }
 
+/** UTF-8 byte length of a value's JSON form — the SAME unit the server's
+ *  validateDataPayload uses for MAX_DATA_BLOB_BYTES, so the prune budget and the
+ *  server cap are compared on the same scale (not UTF-16 char count). */
+function jsonByteLength(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
 export function pruneGeneratedMealImageDataUrls(meals: Meal[]): Meal[] {
   let next = meals.map((meal) => ({ ...meal }));
   const withGeneratedData = next
@@ -112,7 +130,7 @@ export function pruneGeneratedMealImageDataUrls(meals: Meal[]): Meal[] {
   );
 
   for (const { index } of withGeneratedData.slice(0, MEALS_GENERATED_IMAGE_SYNC_MAX_COUNT).reverse()) {
-    if (JSON.stringify(next).length <= MEALS_SYNC_MAX_JSON_CHARS) break;
+    if (jsonByteLength(next) <= MEALS_SYNC_MAX_JSON_BYTES) break;
     next[index] = stripGeneratedImageSyncFields(next[index]);
   }
 

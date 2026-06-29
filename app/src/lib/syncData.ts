@@ -35,6 +35,7 @@
 
 import * as dataApi from "./dataApi";
 import type { DataSection } from "./dataApi";
+import { AuthApiError } from "./authApi";
 import {
   loadMeals,
   saveMeals,
@@ -519,6 +520,44 @@ function notifyDataChanged(section: DataSection): void {
     // Older/edge environments without CustomEvent: a missed in-tab refresh just
     // falls back to the existing focus/storage path — never a hard failure.
   }
+}
+
+/**
+ * USER-VISIBLE SYNC FAILURE signal. Most push failures are TRANSIENT (offline,
+ * 5xx, a logout race) and are retried silently — surfacing those would be noise.
+ * But a NON-retryable server REJECTION (HTTP 400 — e.g. the section blob exceeds
+ * the server's size cap) fails identically on every retry: the save is NOT
+ * reaching the server, so the user MUST be told (silently dropping it is exactly
+ * the "meals don't sync" bug). A small toast (SyncErrorToast) listens for this.
+ * The local copy is always intact — this only reports that a save didn't sync.
+ */
+export const SYNC_ERROR_EVENT = "health-app:sync-error";
+
+export interface SyncErrorDetail {
+  section: DataSection;
+}
+
+/** Fire the user-visible sync-failure signal. SSR-safe + never throws (a notify
+ *  failure must not break the surrounding push). */
+function notifySyncError(detail: SyncErrorDetail): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.dispatchEvent(new CustomEvent(SYNC_ERROR_EVENT, { detail }));
+  } catch {
+    // CustomEvent unavailable (old/edge env): the failure just isn't surfaced —
+    // never a hard throw into the push path.
+  }
+}
+
+/**
+ * Is a PUT rejection TERMINAL (the same blob will be rejected again, so retrying
+ * is pointless and the user should be told)? A server 400 — validation / size cap
+ * (MAX_DATA_BLOB_BYTES) — is terminal. A network failure (fetch threw a TypeError:
+ * no `status`), a 5xx, or a session/rate transient (401/403/429) is NOT terminal:
+ * the caller retries those silently as before. Exported pure for unit tests.
+ */
+export function isTerminalPutRejection(err: unknown): boolean {
+  return err instanceof AuthApiError && err.status === 400;
 }
 
 // ─── Orchestration (I/O) ─────────────────────────────────────────────────────
@@ -1261,7 +1300,17 @@ async function attemptPush(plan: SectionPlan<unknown>, attempt: number): Promise
   if (!isPushable(reconciled.value)) return;
   try {
     await dataApi.putData(plan.section, reconciled.value, csrfToken);
-  } catch {
+  } catch (err) {
+    if (isTerminalPutRejection(err)) {
+      // The server REJECTED this blob (HTTP 400 — e.g. it exceeds the size cap).
+      // Retrying sends the SAME blob → the SAME rejection, so we do NOT retry and
+      // do NOT swallow it: make the failure VISIBLE so the user knows the save did
+      // not sync. Local is intact (never discarded); a later save that shrinks the
+      // blob (e.g. the meals byte-prune) will sync. Silently dropping this is the
+      // "meals don't sync" bug.
+      notifySyncError({ section: plan.section });
+      return;
+    }
     retry();
   }
 }
