@@ -63,11 +63,15 @@ APP_ORIGIN = "https://<your-app-host>"
 # the redirect URI registered in the Google Cloud OAuth client.
 API_ORIGIN = "https://<your-api-host>"
 GOOGLE_REDIRECT_PATH = "/auth/google/callback"
-# Host-only session cookie: scoped to the API host (<your-api-host>) only —
-# deliberately NOT widened to the parent domain. As long as the app and API are
-# the SAME site (e.g. app.example.com + api.example.com share example.com),
-# SameSite=Lax still lets the app's credentialed fetches carry the cookie.
-COOKIE_DOMAIN = ""
+# Session cookie scope. The app's same-origin AI routes (/api/analyze-meal,
+# /api/chat, served by the APP host) verify the login session by reading this
+# cookie server-side. When the app and API live on DIFFERENT subdomains
+# (e.g. app.example.com + api.example.com), the cookie MUST be scoped to the
+# shared PARENT domain (".example.com"): a host-only cookie (Domain="") is NEVER
+# sent cross-host — SameSite does NOT change host scope — which 401s every
+# logged-in user's coach/analysis. Set this to your parent domain; leave it ""
+# only when the app and API share the exact same host.
+COOKIE_DOMAIN = ".example.com"
 COOKIE_SECURE = "true"
 SESSION_TTL_SECONDS = "2592000"
 ENVIRONMENT = "production"
