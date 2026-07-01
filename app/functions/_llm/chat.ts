@@ -21,8 +21,9 @@ import { join } from "node:path";
 
 import { buildChatPrompt, type ChatContext, type ChatTurn } from "./chat-prompt";
 
-/** Default per-call timeout (ms). Codex chat can take ~10-15s; on timeout we throw. */
-const DEFAULT_TIMEOUT_MS = 60_000;
+/** Default per-call timeout (ms). Plain chat takes ~10-15s, but a reply that runs
+ *  a web search (multiple lookups) can take a few minutes, so we allow headroom. */
+const DEFAULT_TIMEOUT_MS = 180_000;
 
 /** Default chat model — overridable via env (CHAT_MODEL, then MEAL_VISION_MODEL). */
 const DEFAULT_CHAT_MODEL = "claude-haiku-4-5";
@@ -61,7 +62,7 @@ export interface CodexChatProviderConfig {
   binary?: string;
   /** Model id; defaults to CHAT_MODEL || MEAL_VISION_MODEL || claude-haiku-4-5. */
   model?: string;
-  /** Per-call timeout in ms (default 60s). */
+  /** Per-call timeout in ms (default 180s — headroom for web search). */
   timeoutMs?: number;
   /** Test seam — inject a fake runner so tests never spawn the real CLI. */
   runner?: CodexChatRunner;
@@ -145,6 +146,13 @@ const defaultRunner: CodexChatRunner = ({ binary, prompt, model, timeoutMs, outF
     // is rejected with HTTP 400 and produces NO -o output. Use codex's default.
     "-c",
     "model_reasoning_effort=none",
+    // Explicitly enable Codex's LIVE web search so the coach can look up product
+    // weights / nutrition facts (with a source) instead of refusing. The key is
+    // the top-level `web_search` (variants: disabled|cached|indexed|live) — NOT
+    // `tools.web_search`. The read-only sandbox is unaffected (search is a network
+    // tool, not a shell command).
+    "-c",
+    'web_search="live"',
     "-o",
     outFile,
     prompt,

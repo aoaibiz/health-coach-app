@@ -160,8 +160,9 @@ describe("meal auto-log nutrition accuracy protocol", () => {
     expect(AUTO_LOG_PROTOCOL).toContain("栄養根拠の優先順位");
     expect(AUTO_LOG_PROTOCOL).toContain("ユーザーが明記した分量・栄養表示・商品ラベル");
     expect(AUTO_LOG_PROTOCOL).toContain("公式DBや標準分量で上書きしてはいけない");
-    expect(AUTO_LOG_PROTOCOL).toContain("外部Web検索を実行できない");
-    expect(AUTO_LOG_PROTOCOL).toContain("検索した/調べたと偽らず");
+    expect(AUTO_LOG_PROTOCOL).toContain("外部Web検索を実行できる");
+    expect(AUTO_LOG_PROTOCOL).toContain("Web検索の安全ルール");
+    expect(AUTO_LOG_PROTOCOL).toContain("憶測で「調べた」と偽らず");
   });
 });
 
