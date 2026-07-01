@@ -96,6 +96,28 @@ describe("extractDishesFromCodexOutput — robust parsing", () => {
     ]);
   });
 
+  it("reads portion_basis so grounding can apply standard portions for uncertain amounts", () => {
+    const text =
+      '```json\n{"dishes":[{"name":"鶏むね肉 皮なし","grams":20,"portion_basis":"standard","source":"db","confidence":"medium"}]}\n```';
+    const dishes = extractDishesFromCodexOutput(text);
+    expect(dishes).toEqual([
+      {
+        name: "鶏むね肉 皮なし",
+        grams: 20,
+        portion_basis: "standard",
+        source: "db",
+        confidence: "medium",
+      },
+    ]);
+  });
+
+  it("ignores an invalid portion_basis", () => {
+    const text =
+      '```json\n{"dishes":[{"name":"卵","grams":50,"portion_basis":"tiny-vibes","confidence":"high"}]}\n```';
+    const dishes = extractDishesFromCodexOutput(text);
+    expect(dishes).toEqual([{ name: "卵", grams: 50, confidence: "high", source: "db" }]);
+  });
+
   it("defaults an unknown source to db and an out-of-range/missing confidence to low; drops nameless rows", () => {
     const text =
       '```json\n{"dishes":[{"name":"卵","grams":50,"source":"bogus"},{"grams":10},{"name":"  ","grams":5}]}\n```';
@@ -293,5 +315,72 @@ describe("CodexProvider.analyzeMeal — with an injected fake runner", () => {
     // A list of only blank strings → no usable images and no text → reject pre-run.
     await expect(provider.analyzeMeal({ imageBase64List: ["", ""] })).rejects.toThrow();
     expect(ran).toBe(false);
+  });
+});
+
+
+describe("CodexProvider.generateMealImage - with an injected fake image runner", () => {
+  // Valid PNG bytes (8-byte signature + body) — the provider now validates PNG
+  // magic before returning (Codex audit S1c).
+  const PNG_HEADER = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const validPng = Buffer.concat([PNG_HEADER, Buffer.from("png-body")]);
+
+  it("returns a base64 PNG from the fake codex image runner and cleans up temp files", async () => {
+    let sawPrompt = "";
+    let sawStagePng = "";
+    const imageRunner = async ({ prompt, stagePng }: any) => {
+      sawPrompt = prompt;
+      sawStagePng = stagePng;
+      const { writeFile } = await import("node:fs/promises");
+      await writeFile(stagePng, validPng);
+      return { stdout: `SAVED: ${stagePng}` };
+    };
+    const provider = new CodexProvider({ imageRunner });
+    const result = await provider.generateMealImage({ text: "鮭定食" });
+    expect(sawPrompt).toContain("鮭定食");
+    expect(result.mimeType).toBe("image/png");
+    expect(result.imageBase64).toBe(validPng.toString("base64"));
+    await expect(stat(sawStagePng)).rejects.toThrow();
+  });
+
+  // Codex audit S1c: a prompt-injected `SAVED: <arbitrary host path>` must NOT be
+  // read — only a path INSIDE the per-call temp dir is accepted.
+  it("rejects a SAVED path OUTSIDE the per-call temp dir (no arbitrary host read)", async () => {
+    const { writeFile, mkdtemp } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    // A file that exists on the host but OUTSIDE the provider's temp dir.
+    const outsideDir = await mkdtemp(join(tmpdir(), "outside-"));
+    const secret = join(outsideDir, "secret.png");
+    await writeFile(secret, validPng); // even a valid PNG must be refused (out of dir)
+    const provider = new CodexProvider({
+      imageRunner: async ({ stagePng }: any) => {
+        // The model is tricked into pointing at the out-of-dir file; the staged
+        // file is never written, so only the injected path could be read.
+        void stagePng;
+        return { stdout: `SAVED: ${secret}` };
+      },
+    });
+    await expect(provider.generateMealImage({ text: "x" })).rejects.toThrow("CODEX_IMAGE_NOT_PRODUCED");
+  });
+
+  it("rejects a non-PNG staged file (PNG magic-byte check)", async () => {
+    const provider = new CodexProvider({
+      imageRunner: async ({ stagePng }: any) => {
+        const { writeFile } = await import("node:fs/promises");
+        await writeFile(stagePng, Buffer.from("this is not a png"));
+        return { stdout: `SAVED: ${stagePng}` };
+      },
+    });
+    await expect(provider.generateMealImage({ text: "x" })).rejects.toThrow("CODEX_IMAGE_NOT_PRODUCED");
+  });
+
+  it("propagates CODEX_NOT_FOUND from the fake image runner", async () => {
+    const provider = new CodexProvider({
+      imageRunner: async () => {
+        throw new Error("CODEX_NOT_FOUND");
+      },
+    });
+    await expect(provider.generateMealImage({ text: "ごはん" })).rejects.toThrow("CODEX_NOT_FOUND");
   });
 });

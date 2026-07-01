@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { createAppServer } from "./index.mjs";
+import { createAppServer, createMealImageJobStore } from "./index.mjs";
 // Compiled (dist) MockProvider — NO network, NO codex CLI (PRD §8).
 import { MockProvider } from "../dist/functions/_llm/mock.js";
 
@@ -7,9 +7,16 @@ import { MockProvider } from "../dist/functions/_llm/mock.js";
 // injecting providers so the real `codex` CLI is NEVER spawned.
 const TEST_TOKEN = "test-health-token";
 
-/** Start a server with a given provider factory; returns base URL + closer. */
+/** Start a server with a given provider factory; returns base URL + closer.
+ *  Defaults to an AUTHENTICATED session (verifySession → true) since most tests
+ *  exercise route wiring, not auth; auth-specific tests override verifySession.
+ *  (Codex audit S1: the AI routes now require a real ha_session, not a token.) */
 function startServer(makeProvider, options = {}) {
-  const server = createAppServer(makeProvider, { token: TEST_TOKEN, ...options });
+  const server = createAppServer(makeProvider, {
+    token: TEST_TOKEN,
+    verifySession: () => true,
+    ...options,
+  });
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
       const { port } = server.address();
@@ -133,10 +140,11 @@ describe("Node server — honest error mapping", () => {
 });
 
 describe("Node server — analysis API hardening", () => {
-  it("missing/incorrect token → 401 before body handling", async () => {
-    const srv = await startServer(() => new MockProvider());
+  it("no valid login session → 401 before body handling (Codex audit S1)", async () => {
+    // A token alone must NOT grant access; the route requires a verified ha_session.
+    const srv = await startServer(() => new MockProvider(), { verifySession: () => false });
     try {
-      const res = await postJson(srv.base, undefined, "x".repeat(10_000_000), "");
+      const res = await postJson(srv.base, undefined, "x".repeat(10_000_000), TEST_TOKEN);
       expect(res.status).toBe(401);
       const data = await res.json();
       expect(data).toEqual({ error: "unauthorized" });
@@ -255,55 +263,59 @@ describe("Node server — static file serving + API isolation", () => {
   });
 });
 
-// Issue ②: a logged-in user (the app is behind AuthGate) must not be asked for
-// an access key. The server injects the shared token into the served HTML so the
-// client unlocks AI automatically. The on-disk export stays token-free.
-describe("Node server — access-token injection into served HTML (issue ②)", () => {
-  it("injects window.__HEALTH_APP_TOKEN__ into the served index HTML", async () => {
+// Codex audit S1: a logged-in user (the app is behind AuthGate) must not be asked
+// for an access key. The server injects a NON-SECRET session-auth FLAG into the
+// served HTML so the client unlocks AI automatically. The shared TOKEN is NEVER
+// injected (a secret in public HTML was an auth-bypass + leak).
+describe("Node server — session-auth flag injection into served HTML (Codex audit S1)", () => {
+  it("injects window.__HEALTH_APP_SESSION_AUTH__=true and NEVER the token", async () => {
     const srv = await startServer(() => new MockProvider());
     try {
       const res = await fetch(`${srv.base}/`);
       expect(res.status).toBe(200);
       expect(res.headers.get("content-type")).toContain("text/html");
       const html = await res.text();
-      expect(html).toContain(`window.__HEALTH_APP_TOKEN__=`);
-      expect(html).toContain(JSON.stringify(TEST_TOKEN));
+      expect(html).toContain(`window.__HEALTH_APP_SESSION_AUTH__=true`);
+      // The shared token must NOT appear anywhere in the served HTML.
+      expect(html).not.toContain("__HEALTH_APP_TOKEN__");
+      expect(html).not.toContain(TEST_TOKEN);
       // The injection sits inside <head>, before the app code runs.
       const headIdx = html.search(/<head[^>]*>/i);
       expect(headIdx).toBeGreaterThanOrEqual(0);
-      expect(html.indexOf("__HEALTH_APP_TOKEN__")).toBeGreaterThan(headIdx);
+      expect(html.indexOf("__HEALTH_APP_SESSION_AUTH__")).toBeGreaterThan(headIdx);
     } finally {
       await srv.close();
     }
   });
 
-  it("injects the token into a sub-page HTML too (e.g. /profile/)", async () => {
+  it("injects the flag into a sub-page HTML too (e.g. /profile/), never the token", async () => {
     const srv = await startServer(() => new MockProvider());
     try {
       const res = await fetch(`${srv.base}/profile/`);
       expect(res.status).toBe(200);
       const html = await res.text();
-      expect(html).toContain(`window.__HEALTH_APP_TOKEN__=`);
-      expect(html).toContain(JSON.stringify(TEST_TOKEN));
+      expect(html).toContain(`window.__HEALTH_APP_SESSION_AUTH__=true`);
+      expect(html).not.toContain("__HEALTH_APP_TOKEN__");
+      expect(html).not.toContain(TEST_TOKEN);
     } finally {
       await srv.close();
     }
   });
 
-  it("omits the injection when HEALTH_APP_TOKEN is unset (manual-key fallback)", async () => {
+  it("omits the flag when HEALTH_APP_TOKEN is unset (AI feature off → manual-key fallback)", async () => {
     const srv = await startServer(() => new MockProvider(), { token: "" });
     try {
       const res = await fetch(`${srv.base}/`);
       expect(res.status).toBe(200);
       const html = await res.text();
+      expect(html).not.toContain("__HEALTH_APP_SESSION_AUTH__");
       expect(html).not.toContain("__HEALTH_APP_TOKEN__");
     } finally {
       await srv.close();
     }
   });
 
-  it("does NOT modify the on-disk export (no token leak in the artifact)", async () => {
-    // Read the static file directly; it must never contain the token.
+  it("does NOT leak the token in the on-disk export NOR in the served HTML", async () => {
     const { readFile } = await import("node:fs/promises");
     const { fileURLToPath } = await import("node:url");
     const { dirname, join } = await import("node:path");
@@ -311,20 +323,12 @@ describe("Node server — access-token injection into served HTML (issue ②)", 
     const onDisk = await readFile(join(here, "..", "out", "index.html"), "utf8");
     expect(onDisk).not.toContain("__HEALTH_APP_TOKEN__");
     expect(onDisk).not.toContain(TEST_TOKEN);
-  });
-
-  it("escapes the token so it cannot break out of the <script> element", async () => {
-    // A hostile token containing </script> must be neutralised (defense-in-depth;
-    // the real token is opaque, but the escaping must hold regardless).
-    const evil = `a</script><script>alert(1)</script>`;
-    const srv = await startServer(() => new MockProvider(), { token: evil });
+    // And the request-time served HTML never carries the token either.
+    const srv = await startServer(() => new MockProvider());
     try {
-      const res = await fetch(`${srv.base}/`);
-      const html = await res.text();
-      // The raw closing tag from the token must NOT appear verbatim; it is
-      // escaped to </script> inside the JS string literal.
-      expect(html).not.toContain(`a</script><script>alert(1)</script>`);
-      expect(html).toContain("\\u003c");
+      const served = await (await fetch(`${srv.base}/`)).text();
+      expect(served).not.toContain("__HEALTH_APP_TOKEN__");
+      expect(served).not.toContain(TEST_TOKEN);
     } finally {
       await srv.close();
     }
@@ -417,16 +421,34 @@ async function postImageJson(base, body, raw, token = TEST_TOKEN) {
   });
 }
 
-function deferred() {
-  let resolve;
-  const promise = new Promise((r) => {
-    resolve = r;
+// Codex audit S1 (image path): meal-image generation ran user-controlled prompt
+// text through a tool-capable Codex CLI with `--sandbox danger-full-access`, then
+// read back the file path the model emitted — a prompt-injection could exfiltrate
+// arbitrary HOST files. The route is now FAIL-CLOSED (always 503) so no user input
+// ever reaches that path; the danger-full-access provider is never invoked.
+describe("Node server - POST /api/generate-meal-image route is fail-closed (Codex audit S1)", () => {
+  it("returns 503 image_generation_unavailable and NEVER invokes the image provider", async () => {
+    let providerCalls = 0;
+    const srv = await startServer(() => new MockProvider(), {
+      makeImageProvider: () => ({
+        async generateMealImage() {
+          providerCalls += 1; // must never happen
+          throw new Error("should not run");
+        },
+      }),
+    });
+    try {
+      const res = await postImageJson(srv.base, { text: "鮭定食" });
+      expect(res.status).toBe(503);
+      const data = await res.json();
+      expect(data.error).toBe("image_generation_unavailable");
+      expect(providerCalls).toBe(0);
+    } finally {
+      await srv.close();
+    }
   });
-  return { promise, resolve };
-}
 
-describe("Node server - POST /api/generate-meal-image route wiring", () => {
-  it("missing/incorrect token -> 401 before body handling", async () => {
+  it("is 503 even with a (now-ignored) token header — no body is read, no provider runs", async () => {
     const srv = await startServer(() => new MockProvider(), {
       makeImageProvider: () => ({
         async generateMealImage() {
@@ -435,179 +457,86 @@ describe("Node server - POST /api/generate-meal-image route wiring", () => {
       }),
     });
     try {
-      const res = await postImageJson(srv.base, undefined, "x".repeat(10_000_000), "");
-      expect(res.status).toBe(401);
-      expect(await res.json()).toEqual({ error: "unauthorized" });
-    } finally {
-      await srv.close();
-    }
-  });
-
-  it("valid text -> 200 with injected fake image provider", async () => {
-    let sawText = "";
-    const srv = await startServer(() => new MockProvider(), {
-      makeImageProvider: () => ({
-        async generateMealImage(input) {
-          sawText = input.text;
-          return {
-            imageBase64: Buffer.from("fake-png").toString("base64"),
-            mimeType: "image/png",
-            generatedBy: "fake-image-provider",
-          };
-        },
-      }),
-    });
-    try {
-      const res = await postImageJson(srv.base, { text: "鮭定食" });
-      expect(res.status).toBe(200);
-      expect(sawText).toBe("鮭定食");
-      const data = await res.json();
-      expect(data.mimeType).toBe("image/png");
-      expect(data.imageBase64).toBe(Buffer.from("fake-png").toString("base64"));
-      expect(data.generatedBy).toBe("fake-image-provider");
-    } finally {
-      await srv.close();
-    }
-  });
-
-  it("coalesces concurrent same-text image requests into one provider job", async () => {
-    let calls = 0;
-    const started = deferred();
-    const release = deferred();
-    const srv = await startServer(() => new MockProvider(), {
-      maxConcurrency: 1,
-      makeImageProvider: () => ({
-        async generateMealImage(input) {
-          calls += 1;
-          expect(input.text).toBe("鶏むね肉");
-          started.resolve();
-          await release.promise;
-          return {
-            imageBase64: Buffer.from("coalesced-png").toString("base64"),
-            mimeType: "image/png",
-            generatedBy: "fake-image-provider",
-          };
-        },
-      }),
-    });
-    try {
-      const first = postImageJson(srv.base, { text: "鶏むね肉" });
-      await started.promise;
-      const second = postImageJson(srv.base, { text: " 鶏むね肉 " });
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(calls).toBe(1);
-      release.resolve();
-
-      const [a, b] = await Promise.all([first, second]);
-      expect(a.status).toBe(200);
-      expect(b.status).toBe(200);
-      expect((await a.json()).imageBase64).toBe(Buffer.from("coalesced-png").toString("base64"));
-      expect((await b.json()).imageBase64).toBe(Buffer.from("coalesced-png").toString("base64"));
-      expect(calls).toBe(1);
-    } finally {
-      release.resolve();
-      await srv.close();
-    }
-  });
-
-  it("serves a completed same-text retry from the short-lived image cache", async () => {
-    let calls = 0;
-    const srv = await startServer(() => new MockProvider(), {
-      makeImageProvider: () => ({
-        async generateMealImage() {
-          calls += 1;
-          return {
-            imageBase64: Buffer.from(`cached-png-${calls}`).toString("base64"),
-            mimeType: "image/png",
-            generatedBy: "fake-image-provider",
-          };
-        },
-      }),
-    });
-    try {
-      const first = await postImageJson(srv.base, { text: "鮭定食" });
-      const second = await postImageJson(srv.base, { text: " 鮭定食 " });
-
-      expect(first.status).toBe(200);
-      expect(second.status).toBe(200);
-      expect((await first.json()).imageBase64).toBe(Buffer.from("cached-png-1").toString("base64"));
-      expect((await second.json()).imageBase64).toBe(Buffer.from("cached-png-1").toString("base64"));
-      expect(calls).toBe(1);
-    } finally {
-      await srv.close();
-    }
-  });
-
-  it("does not coalesce different long prompts that only share the first 200 characters", async () => {
-    let calls = 0;
-    const sharedPrefix = "x".repeat(210);
-    const srv = await startServer(() => new MockProvider(), {
-      makeImageProvider: () => ({
-        async generateMealImage(input) {
-          calls += 1;
-          return {
-            imageBase64: Buffer.from(`long-prompt-${input.text.endsWith("A") ? "a" : "b"}`).toString("base64"),
-            mimeType: "image/png",
-            generatedBy: "fake-image-provider",
-          };
-        },
-      }),
-    });
-    try {
-      const first = await postImageJson(srv.base, { text: `${sharedPrefix}A` });
-      const second = await postImageJson(srv.base, { text: `${sharedPrefix}B` });
-
-      expect(first.status).toBe(200);
-      expect(second.status).toBe(200);
-      expect((await first.json()).imageBase64).toBe(Buffer.from("long-prompt-a").toString("base64"));
-      expect((await second.json()).imageBase64).toBe(Buffer.from("long-prompt-b").toString("base64"));
-      expect(calls).toBe(2);
-    } finally {
-      await srv.close();
-    }
-  });
-
-  it("fake provider missing codex -> 503 image_generation_unavailable", async () => {
-    const srv = await startServer(() => new MockProvider(), {
-      makeImageProvider: () => ({
-        async generateMealImage() {
-          throw new Error("CODEX_NOT_FOUND");
-        },
-      }),
-    });
-    try {
-      const res = await postImageJson(srv.base, { text: "ごはん" });
+      // A huge body would only matter if it were read; the route 503s first.
+      const res = await postImageJson(srv.base, undefined, "x".repeat(10_000_000), TEST_TOKEN);
       expect(res.status).toBe(503);
-      const data = await res.json();
-      expect(data.error).toBe("image_generation_unavailable");
+      expect((await res.json()).error).toBe("image_generation_unavailable");
     } finally {
       await srv.close();
     }
   });
 
-  it("fake provider timeout/parse failure -> 502 without image data", async () => {
-    const srv = await startServer(() => new MockProvider(), {
-      makeImageProvider: () => ({
-        async generateMealImage() {
-          throw new Error("CODEX_TIMEOUT");
-        },
-      }),
-    });
+  it("non-POST → 405", async () => {
+    const srv = await startServer(() => new MockProvider());
     try {
-      const res = await postImageJson(srv.base, { text: "ごはん" });
-      expect(res.status).toBe(502);
-      const data = await res.json();
-      expect(data.imageBase64).toBeUndefined();
-      expect(data.error).toBeTruthy();
+      const res = await fetch(`${srv.base}/api/generate-meal-image`, { method: "GET" });
+      expect(res.status).toBe(405);
     } finally {
       await srv.close();
     }
   });
 
-  it("real Codex image runner is configured with temp cwd and a longer timeout", async () => {
-    const source = await (await import("node:fs/promises")).readFile(new URL("../functions/_llm/codex.ts", import.meta.url), "utf8");
-    expect(source).toContain("const DEFAULT_TIMEOUT_MS = 120_000");
-    expect(source).toContain('\"--cd\",');
-    expect(source).toContain("cwd,");
+  it("the danger-full-access image runner read path is contained + PNG-validated (Codex audit S1c)", async () => {
+    const source = await (await import("node:fs/promises")).readFile(
+      new URL("../functions/_llm/codex.ts", import.meta.url),
+      "utf8",
+    );
+    // Defense-in-depth in the provider itself: realpath-containment + PNG magic.
+    expect(source).toContain("readGeneratedPngWithinDir");
+    expect(source).toContain("PNG_MAGIC");
+    expect(source).toContain("CODEX_IMAGE_PATH_OUTSIDE_TEMP");
+  });
+});
+
+describe("createMealImageJobStore — async getOrStart (Codex audit S1 re-enable)", () => {
+  it("returns pending while generating and the SAME meal does not start a second job", async () => {
+    let resolveGen;
+    const producer = () => new Promise((r) => {
+      resolveGen = r;
+    });
+    const store = createMealImageJobStore({ maxConcurrent: 2 });
+    expect(store.getOrStart("鮭定食", producer).status).toBe("pending");
+    // Same key while in-flight → still pending; the second producer must NOT run.
+    const second = store.getOrStart("鮭定食", () => {
+      throw new Error("second producer should not run for an in-flight meal");
+    });
+    expect(second.status).toBe("pending");
+    expect(store.pendingCount()).toBe(1);
+    await new Promise((r) => setTimeout(r, 0)); // let the deferred producer run
+    resolveGen({ imageBase64: "abc", mimeType: "image/png", generatedBy: "x" });
+  });
+
+  it("becomes done (cached) after the generation resolves", async () => {
+    let resolveGen;
+    const store = createMealImageJobStore({ maxConcurrent: 2 });
+    store.getOrStart("親子丼", () => new Promise((r) => {
+      resolveGen = r;
+    }));
+    await new Promise((r) => setTimeout(r, 0)); // let the deferred producer run + assign resolveGen
+    resolveGen({ imageBase64: "xyz", mimeType: "image/png", generatedBy: "x" });
+    await new Promise((r) => setTimeout(r, 0)); // let the .then cache the result
+    const done = store.getOrStart("親子丼", () => {
+      throw new Error("producer should not run once cached");
+    });
+    expect(done.status).toBe("done");
+    expect(done.data.imageBase64).toBe("xyz");
+  });
+
+  it("remembers a recent failure as error, then allows a retry after the error TTL", async () => {
+    let t = 1000;
+    const store = createMealImageJobStore({ maxConcurrent: 2, errorTtlMs: 100, now: () => t });
+    store.getOrStart("boom", () => Promise.reject(new Error("gen failed")));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(store.getOrStart("boom", () => {
+      throw new Error("no retry while error is fresh");
+    }).status).toBe("error");
+    t += 200; // let the error entry expire
+    expect(store.getOrStart("boom", () => new Promise(() => {})).status).toBe("pending");
+  });
+
+  it("returns busy when maxConcurrent background jobs are already running", () => {
+    const store = createMealImageJobStore({ maxConcurrent: 1 });
+    expect(store.getOrStart("a", () => new Promise(() => {})).status).toBe("pending");
+    expect(store.getOrStart("b", () => new Promise(() => {})).status).toBe("busy");
   });
 });

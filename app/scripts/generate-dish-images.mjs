@@ -36,7 +36,7 @@ const REPO = resolve(__dirname, "..");
 const OUT_DIR = join(REPO, "public", "dish-guides");
 const TARGET_PX = 512; // EXACT square canvas — see optimizeInto.
 // The meal card shows the dish in a SQUARE object-contain box, so a non-square source
-// letterboxes (uneven top/bottom margins → the "framing is uneven" bug Ao flagged).
+// letterboxes (uneven top/bottom margins → an "uneven framing" bug).
 // We force every output to an EXACT 512×512 square, padding (never stretching) with
 // the same pale background so the dish keeps its proportions and every illustration
 // frames identically. #f8fafc must match STYLE_PREFIX's background.
@@ -112,8 +112,12 @@ function generateOne(entry) {
     [
       "exec",
       "--skip-git-repo-check",
+      // Minimal-privilege sandbox (matches the runtime image path): writes only to
+      // the stage dir, never danger-full-access.
+      "--cd",
+      stageDir,
       "--sandbox",
-      "danger-full-access",
+      "workspace-write",
       "--enable",
       "image_generation",
       codexInstruction,
@@ -122,12 +126,10 @@ function generateOne(entry) {
   );
 
   const out = `${res.stdout || ""}\n${res.stderr || ""}`;
-  // Prefer the file codex was told to write; else recover the SAVED: path it printed.
-  let produced = existsSync(stagePng) ? stagePng : null;
-  if (!produced) {
-    const m = out.match(/SAVED:\s*(\S+\.png)/i);
-    if (m && existsSync(m[1])) produced = m[1];
-  }
+  // Accept ONLY the file codex was told to write, inside the per-run stage dir.
+  // Do NOT trust an arbitrary model-emitted `SAVED: <path>` (containment — the
+  // workspace-write sandbox already confines writes to stageDir; no path traversal).
+  const produced = existsSync(stagePng) ? stagePng : null;
   if (!produced) {
     console.error(`  ✗ no image produced for ${entry.slug}`);
     console.error(`  codex tail: ${out.trim().split("\n").slice(-6).join("\n  ")}`);

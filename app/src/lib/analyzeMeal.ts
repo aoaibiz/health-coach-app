@@ -18,45 +18,43 @@ import { itemsToNutrition, setItemGrams, toMealItem } from "./mealItems";
 export const API_TOKEN_STORAGE_KEY = "health-app:apiToken";
 
 /**
- * Global name the SERVER injects the shared access token under, at request time,
- * into the served HTML (see server/index.mjs `injectAppToken`). When present it
- * means the user is already past the login gate (AuthGate) on a server that has
- * HEALTH_APP_TOKEN configured, so the AI features should be UNLOCKED with NO
- * manual key entry — the user has logged in; asking for an access key on top of
- * that is redundant (Ao feedback). It is the SAME shared value that every
- * browser already stored in localStorage and sent on every request, so injecting
- * it does not widen exposure.
- *
- * SECURITY: the token is read only on the client, used only as the
- * X-Health-App-Token request header, and never logged or echoed elsewhere. When
- * the env is unset the server omits the injection and the app falls back to the
- * manual-key path (honest), so nothing breaks.
+ * SESSION-AUTH FLAG (Codex audit S1). The server NO LONGER injects the shared
+ * access token into the served HTML — a secret in public HTML was an auth-bypass
+ * + leak. Instead it injects a NON-SECRET boolean flag under this global, meaning
+ * "AI is enabled and authorized by your LOGIN SESSION (the ha_session cookie)".
+ * The AI routes are same-origin under health-coach.example.com, so the HttpOnly
+ * session cookie travels automatically and the server verifies it — no token is
+ * needed on the client at all. The app is behind AuthGate, so a mounted AI view
+ * already means the user is logged in.
  */
 declare global {
   // eslint-disable-next-line no-var
-  var __HEALTH_APP_TOKEN__: string | undefined;
+  var __HEALTH_APP_SESSION_AUTH__: boolean | undefined;
 }
 
-/** The server-injected shared access token, or "" when absent. SSR-safe. */
-function readInjectedToken(): string {
-  if (typeof window === "undefined") return "";
+/** True when the server signalled that AI is unlocked by the user's login session
+ *  (no manual access key needed). SSR-safe. */
+function sessionAuthEnabled(): boolean {
+  if (typeof window === "undefined") return false;
   try {
-    const t = (window as { __HEALTH_APP_TOKEN__?: unknown }).__HEALTH_APP_TOKEN__;
-    return typeof t === "string" ? t.trim() : "";
+    return (
+      (window as { __HEALTH_APP_SESSION_AUTH__?: unknown }).__HEALTH_APP_SESSION_AUTH__ === true
+    );
   } catch {
-    return "";
+    return false;
   }
 }
 
 /**
- * The access token to send with AI requests: the SERVER-INJECTED shared token
- * takes precedence (logged-in user on a configured server → no manual key), then
- * the user's manually-stored key (advanced "use my own key" path / server with
- * the env unset). SSR-safe (returns ""). This is the single source of truth used
- * by analyzeMeal, chat, and hasApiKey so the unlock logic can never diverge.
+ * The access token to send with AI requests. After the session-auth migration the
+ * shared token is no longer injected into HTML nor synced to the server; the AI
+ * routes authorize on the same-origin ha_session cookie. This returns ONLY a
+ * manually-stored "own key" (the advanced path / a server with the env unset).
+ * Normally "" → no X-Health-App-Token header is sent and the session cookie
+ * authorizes the request. SSR-safe (returns "").
  */
 export function resolveApiToken(): string {
-  return readInjectedToken() || readStoredToken();
+  return readStoredToken();
 }
 
 /** Shape returned by the analyze-meal function (mirrors AnalyzeMealResponse). */
@@ -259,7 +257,9 @@ function readStoredToken(): string {
  * whether to show the friendly "set your key" hint. SSR-safe (returns false).
  */
 export function hasApiKey(): boolean {
-  return resolveApiToken() !== "";
+  // AI is unlocked when the login session authorizes it (the normal logged-in
+  // path — no key) OR a manual own-key is stored (advanced path / env unset).
+  return sessionAuthEnabled() || resolveApiToken() !== "";
 }
 
 /**
@@ -370,12 +370,23 @@ export interface GenerateMealImageInput {
 export interface GenerateMealImageOptions {
   fetchImpl?: typeof fetch;
   endpoint?: string;
+  /** Poll interval while the server reports the job is still generating (ms). */
+  pollIntervalMs?: number;
+  /** Overall ceiling before giving up on a slow generation (ms). */
+  timeoutMs?: number;
+  /** Hard timeout for each individual poll request (aborts a hung fetch, ms). */
+  perRequestTimeoutMs?: number;
+  /** Test seam — inject a fake sleep so polling tests don't wait in real time. */
+  sleepImpl?: (ms: number) => Promise<void>;
 }
 
 export interface GenerateMealImageResponse {
-  imageBase64: string;
-  mimeType: "image/png";
-  generatedBy: string;
+  /** Async job state: "done" (image ready), "pending" (still generating), "error". */
+  status?: "done" | "pending" | "error";
+  imageBase64?: string;
+  mimeType?: "image/png";
+  generatedBy?: string;
+  message?: string;
 }
 
 /** Generate an appetising meal-title illustration through the server's Codex subscription path. */
@@ -392,21 +403,61 @@ export async function generateMealImage(
   const apiToken = resolveApiToken();
   if (apiToken) headers["X-Health-App-Token"] = apiToken;
 
-  const res = await doFetch(endpoint, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ text }),
-  });
-  if (!res.ok) {
-    if (res.status === 401) throw new Error("アクセスキーを設定してください");
-    if (res.status === 503) throw new Error("画像生成は準備中です");
-    throw new Error(`画像生成に失敗しました (${res.status})`);
+  // The server generates ASYNCHRONOUSLY — a generation can take ~2-3 min, longer
+  // than the gateway timeout, so the server returns {status:"pending"} immediately
+  // and does the work in the background. We POST to start/resume the job and POLL
+  // the same endpoint (each request is fast) until it reports "done" or "error".
+  const pollIntervalMs = options.pollIntervalMs ?? 4000;
+  const timeoutMs = options.timeoutMs ?? 210_000;
+  const perRequestTimeoutMs = options.perRequestTimeoutMs ?? 20_000;
+  const sleep = options.sleepImpl ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const deadline = Date.now() + timeoutMs;
+
+  for (;;) {
+    if (Date.now() >= deadline) {
+      throw new Error("画像生成に時間がかかっています。少し後で再度お試しください。");
+    }
+    // Hard per-request timeout so a hung request can never stall the loop past the
+    // overall deadline; an abort/network error is treated as "still pending".
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : undefined;
+    const abortTimer = controller ? setTimeout(() => controller.abort(), perRequestTimeoutMs) : undefined;
+    let res: Response;
+    try {
+      res = await doFetch(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ text }),
+        signal: controller?.signal,
+      });
+    } catch {
+      if (Date.now() + pollIntervalMs >= deadline) {
+        throw new Error("画像生成に時間がかかっています。少し後で再度お試しください。");
+      }
+      await sleep(pollIntervalMs);
+      continue;
+    } finally {
+      if (abortTimer) clearTimeout(abortTimer);
+    }
+    if (!res.ok) {
+      if (res.status === 401) throw new Error("ログインが必要です。もう一度ログインしてください");
+      if (res.status === 503) throw new Error("画像生成は現在ご利用いただけません");
+      throw new Error(`画像生成に失敗しました (${res.status})`);
+    }
+    const data = (await res.json()) as GenerateMealImageResponse;
+
+    if (data.status === "error") {
+      throw new Error(data.message || "画像生成に失敗しました");
+    }
+    // Image ready (status:"done", or a legacy server that returns the image directly).
+    if (data.imageBase64 && data.mimeType === "image/png") {
+      const bytes = Uint8Array.from(atob(data.imageBase64), (c) => c.charCodeAt(0));
+      return new Blob([bytes], { type: data.mimeType });
+    }
+    // Still generating → wait, then poll again (unless we have run out the clock).
+    if (Date.now() + pollIntervalMs > deadline) {
+      throw new Error("画像生成に時間がかかっています。少し後で再度お試しください。");
+    }
+    await sleep(pollIntervalMs);
   }
-  const data = (await res.json()) as GenerateMealImageResponse;
-  if (!data.imageBase64 || data.mimeType !== "image/png") {
-    throw new Error("画像生成に失敗しました");
-  }
-  const bytes = Uint8Array.from(atob(data.imageBase64), (c) => c.charCodeAt(0));
-  return new Blob([bytes], { type: data.mimeType });
 }
 

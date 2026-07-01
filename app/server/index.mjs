@@ -76,7 +76,7 @@ const SECURITY_HEADERS = {
     "img-src 'self' data: blob:",
     "style-src 'self' 'unsafe-inline'",
     "script-src 'self' 'unsafe-inline'",
-    "connect-src 'self' https://health-api.mogubusi.trade",
+    "connect-src 'self' https://health-coach-api.example.com",
     "worker-src 'self'",
     "manifest-src 'self'",
   ].join("; "),
@@ -102,46 +102,67 @@ function configuredToken(options = {}) {
   return options.token ?? process.env.HEALTH_APP_TOKEN ?? "";
 }
 
-/**
- * Escape a string for SAFE embedding inside a JSON string literal that sits in an
- * inline <script>. JSON.stringify handles quotes/backslashes/control chars; we
- * additionally neutralise `<` (so `</script>` / `<!--` can never break out of the
- * script element) and the JS line separators. The result is a valid JS string
- * literal that cannot escape the script context, regardless of the token's bytes.
- */
-function jsonForScript(value) {
-  return JSON.stringify(value)
-    .replace(/</g, "\\u003c")
-    .replace(/>/g, "\\u003e")
-    .replace(/\u2028/g, "\\u2028")
-    .replace(/\u2029/g, "\\u2029");
+/** Origin of the API Worker that owns the login session store (ha_session → D1).
+ *  The AI routes verify a caller's session by forwarding its Cookie header here. */
+function healthApiOrigin(options = {}) {
+  return (
+    options.healthApiOrigin ??
+    process.env.HEALTH_API_ORIGIN ??
+    "https://health-coach-api.example.com"
+  );
 }
 
 /**
- * Inject the shared access token onto `window.__HEALTH_APP_TOKEN__` so a
- * logged-in user (the app is behind AuthGate) gets the AI features unlocked with
- * NO manual access-key entry (Ao feedback: login already authenticates the user).
+ * Inject a NON-SECRET session-auth flag (`window.__HEALTH_APP_SESSION_AUTH__=true`)
+ * so a logged-in user (the app is behind AuthGate) gets the AI features unlocked
+ * with NO manual access-key entry.
  *
- * - Injected at REQUEST time into the served HTML — the static export on disk
- *   never contains the token, so a `git`/CDN artifact can't leak it.
- * - Only when HEALTH_APP_TOKEN is configured; otherwise the HTML is served
- *   unchanged and the client falls back to the manual-key path (honest).
- * - The SAME shared value the client already stored in localStorage and sent on
- *   every request — injecting it does not widen exposure. It is read only on the
- *   client and used solely as the X-Health-App-Token header.
+ * The shared access TOKEN is NO LONGER injected (Codex audit S1): putting a secret
+ * into public HTML was both a leak and an auth-bypass (the token alone passed the
+ * AI routes). The real authorization is the same-origin HttpOnly `ha_session`
+ * cookie, verified server-side on every AI route (see hasValidSession). This flag
+ * carries NOTHING secret — it is a literal `true`, so there is nothing to escape.
  *
- * The inline script is allowed by the CSP (`script-src 'self' 'unsafe-inline'`).
- * Inserted right after the opening <head> so it runs before app code. Returns the
- * HTML unchanged when there's no <head> or no token.
+ * Injected only when the AI feature is enabled (HEALTH_APP_TOKEN configured);
+ * otherwise the HTML is served unchanged and the app falls back to the manual-key
+ * path. Inserted right after <head> (allowed by the CSP). Returns the HTML
+ * unchanged when there's no <head> or the feature is off.
  */
-function injectAppToken(html, token) {
-  if (!token) return html;
-  const snippet = `<script>window.__HEALTH_APP_TOKEN__=${jsonForScript(token)};</script>`;
+function injectSessionAuthFlag(html, enabled) {
+  if (!enabled) return html;
+  const snippet = `<script>window.__HEALTH_APP_SESSION_AUTH__=true;</script>`;
   // Insert after the first opening <head ...> tag.
   const m = html.match(/<head[^>]*>/i);
   if (!m) return html; // no head → leave untouched (manual-key fallback still works).
   const idx = m.index + m[0].length;
   return html.slice(0, idx) + snippet + html.slice(idx);
+}
+
+/**
+ * Verify the caller holds a real, server-validated login session (`ha_session`).
+ * We cannot validate the cookie here — the D1 session store lives in the API
+ * Worker — so we forward the request's Cookie header to the Worker's GET /auth/me
+ * and trust ONLY a 200 (a resolved session). FAIL-CLOSED: a missing cookie, any
+ * non-200, or a network error → unauthenticated. This REPLACES the old shared-token
+ * gate (Codex audit S1: a token alone must NEVER grant access). `options.verifySession`
+ * is a test seam; `options.healthApiOrigin` overrides the Worker origin.
+ */
+async function hasValidSession(req, options = {}) {
+  if (typeof options.verifySession === "function") {
+    return options.verifySession(req);
+  }
+  const cookie = req.headers["cookie"];
+  // Fast reject (no network) when there is clearly no session cookie at all.
+  if (!cookie || !/(?:^|;\s*)ha_session=/.test(cookie)) return false;
+  try {
+    const resp = await fetch(`${healthApiOrigin(options)}/auth/me`, {
+      method: "GET",
+      headers: { cookie },
+    });
+    return resp.status === 200;
+  } catch {
+    return false; // API Worker unreachable → fail closed (no access).
+  }
 }
 
 function configuredMaxConcurrency(options = {}) {
@@ -177,6 +198,12 @@ export function createMealImageJobStore(options = {}) {
   const now = options.now ?? (() => Date.now());
   const cache = new Map();
   const inFlight = new Map();
+  const errors = new Map();
+  // Remember a recent failure briefly so a polling client sees "error" instead of
+  // silently re-triggering another 2-minute generation on every poll.
+  const errorTtlMs = options.errorTtlMs ?? 60_000;
+  // Cap concurrent BACKGROUND generations (each is a slow codex process).
+  const maxConcurrent = options.maxConcurrent ?? 2;
 
   function prune() {
     const current = now();
@@ -187,6 +214,16 @@ export function createMealImageJobStore(options = {}) {
       const oldest = cache.keys().next().value;
       if (oldest === undefined) break;
       cache.delete(oldest);
+    }
+    // Bound the failure map too (Codex audit S1 re-enable): drop expired entries
+    // and cap the size so many unique failing meal texts cannot grow memory.
+    for (const [key, entry] of errors) {
+      if (entry.expiresAt <= current) errors.delete(key);
+    }
+    while (errors.size > maxEntries) {
+      const oldest = errors.keys().next().value;
+      if (oldest === undefined) break;
+      errors.delete(oldest);
     }
   }
 
@@ -215,6 +252,49 @@ export function createMealImageJobStore(options = {}) {
         });
       inFlight.set(key, promise);
       return promise;
+    },
+    // Non-blocking async job accessor (Codex audit S1 re-enable). NEVER awaits the
+    // producer, so the HTTP request returns instantly and can never hit a gateway
+    // timeout. Returns the current state; the client polls until "done"/"error".
+    //   done    -> the cached image is ready
+    //   pending -> a generation is running (or was just started here)
+    //   error   -> the last attempt failed recently (retry after it expires)
+    //   busy    -> too many generations in flight; try again shortly
+    getOrStart(text, producer) {
+      const key = normalizeMealImageJobKey(text);
+      const current = now();
+
+      const cached = cache.get(key);
+      if (cached && cached.expiresAt > current) return { status: "done", data: cached.data };
+      if (cached) cache.delete(key);
+
+      const err = errors.get(key);
+      if (err && err.expiresAt > current) return { status: "error", message: err.message };
+      if (err) errors.delete(key);
+
+      if (inFlight.has(key)) return { status: "pending" };
+      if (inFlight.size >= maxConcurrent) return { status: "busy" };
+
+      const promise = Promise.resolve()
+        .then(producer)
+        .then((data) => {
+          if (maxEntries > 0 && ttlMs > 0) {
+            cache.set(key, { data, expiresAt: now() + ttlMs });
+            prune();
+          }
+        })
+        .catch((e) => {
+          errors.set(key, {
+            message: (e && e.message) || "failed",
+            expiresAt: now() + errorTtlMs,
+          });
+          prune();
+        })
+        .finally(() => {
+          if (inFlight.get(key) === promise) inFlight.delete(key);
+        });
+      inFlight.set(key, promise);
+      return { status: "pending" };
     },
     cachedCount() {
       prune();
@@ -307,7 +387,10 @@ export async function handleAnalyzeMealRoute(
     return;
   }
 
-  if (req.headers["x-health-app-token"] !== token) {
+  // AUTH (Codex audit S1): require a real, server-verified login session
+  // (ha_session) — NOT a shared token. The session cookie is same-origin, so it
+  // travels automatically; we verify it against the API Worker. Fail-closed.
+  if (!(await hasValidSession(req, options))) {
     sendJson(res, 401, { error: "unauthorized" });
     return;
   }
@@ -372,19 +455,39 @@ export async function handleAnalyzeMealRoute(
 export async function handleGenerateMealImageRoute(
   req,
   res,
+  // eslint-disable-next-line no-unused-vars
   makeProvider = defaultMakeImageProvider,
+  // eslint-disable-next-line no-unused-vars
   options = {},
 ) {
   if (req.method !== "POST") {
     sendJson(res, 405, { error: "Method not allowed" });
     return;
   }
-  const token = configuredToken(options);
-  if (!token) {
-    sendJson(res, 503, { error: "image_generation_unavailable", message: "画像生成は準備中です。" });
+
+  // Feature gate: the securely-rebuilt image path stays OFF (clean 503) until it
+  // has been verified end-to-end and independently reviewed. Flip
+  // HEALTH_MEAL_IMAGE_ENABLED=1 in the service env to enable.
+  if (String(process.env.HEALTH_MEAL_IMAGE_ENABLED || "").trim() !== "1") {
+    sendJson(res, 503, {
+      error: "image_generation_unavailable",
+      message: "画像生成は現在ご利用いただけません。",
+    });
     return;
   }
-  if (req.headers["x-health-app-token"] !== token) {
+
+  const token = configuredToken(options);
+  if (!token) {
+    sendJson(res, 503, {
+      error: "image_generation_unavailable",
+      message: "画像生成は現在ご利用いただけません。",
+    });
+    return;
+  }
+
+  // AUTH (Codex audit S1): require a real, server-verified login session
+  // (ha_session) — NOT a shared token. Fail-closed.
+  if (!(await hasValidSession(req, options))) {
     sendJson(res, 401, { error: "unauthorized" });
     return;
   }
@@ -393,48 +496,77 @@ export async function handleGenerateMealImageRoute(
   try {
     raw = await readBody(req);
   } catch (err) {
-    sendJson(res, err && err.tooLarge ? 413 : 400, { error: err && err.tooLarge ? "リクエストが大きすぎます" : "Invalid request body" });
+    if (err && err.tooLarge) {
+      sendJson(res, 413, { error: "リクエストが大きすぎます" });
+    } else {
+      sendJson(res, 400, { error: "Invalid request body" });
+    }
     return;
   }
+
   let body;
   try {
-    body = JSON.parse(raw);
+    body = JSON.parse((raw && raw.toString ? raw.toString("utf8") : String(raw)) || "{}");
   } catch {
-    sendJson(res, 400, { error: "Invalid request body" });
+    sendJson(res, 400, { error: "Invalid JSON" });
     return;
   }
-  const text = typeof body.text === "string" ? body.text.trim() : "";
-  if (!text) {
-    sendJson(res, 400, { error: "text required" });
+  const text = typeof body.text === "string" ? body.text : "";
+  const itemNames = Array.isArray(body.itemNames)
+    ? body.itemNames.filter((s) => typeof s === "string")
+    : undefined;
+  if (!text.trim() && !(itemNames && itemNames.length)) {
+    sendJson(res, 400, { error: "meal text required" });
     return;
   }
-  try {
-    const semaphore = options.semaphore;
-    const runProvider = async () => {
-      const acquired = semaphore ? semaphore.acquire() : true;
-      if (!acquired) throw new Error(IMAGE_GENERATION_BUSY);
-      try {
-        return await makeProvider().generateMealImage({ text });
-      } finally {
-        if (semaphore) semaphore.release();
-      }
-    };
-    const data = options.imageJobs
-      ? await options.imageJobs.run(text, runProvider)
-      : await runProvider();
-    sendJson(res, 200, data);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg === IMAGE_GENERATION_BUSY) {
-      sendJson(res, 503, { error: "busy", message: "混み合っています。少し後でお試しください。" });
-      return;
-    }
-    if (msg === "CODEX_NOT_FOUND") {
-      sendJson(res, 503, { error: "image_generation_unavailable", message: "画像生成が今使えません。少し後でお試しください。" });
-      return;
-    }
-    sendJson(res, 502, { error: "画像生成に失敗しました。あとで再試行できます。" });
+
+  // ASYNC generation (Codex audit S1 RE-ENABLE). NEVER block the request on the
+  // ~2-minute generation — a synchronous wait 524s at the Cloudflare gateway.
+  // Instead kick the job off in the background via the job store and return the
+  // current state instantly; the client polls this same endpoint until "done".
+  // The provider runs Codex image_gen in a workspace-write jail (NO
+  // danger-full-access), SANITISES the untrusted meal text to a food subject, and
+  // reads back ONLY a PNG contained in the per-call temp dir (containment +
+  // PNG-magic + size). The store caps concurrent background jobs + remembers a
+  // recent failure so a poll sees "error" instead of silently restarting.
+  const jobs = options.imageJobs;
+  if (!jobs || typeof jobs.getOrStart !== "function") {
+    sendJson(res, 503, {
+      error: "image_generation_unavailable",
+      message: "画像生成は現在ご利用いただけません。",
+    });
+    return;
   }
+  const provider = makeProvider();
+  const subjectText = text || (itemNames ? itemNames.join(" / ") : "");
+  const state = jobs.getOrStart(subjectText, () =>
+    provider.generateMealImage({ text, itemNames }),
+  );
+
+  if (state.status === "done") {
+    sendJson(res, 200, {
+      status: "done",
+      imageBase64: state.data.imageBase64,
+      mimeType: state.data.mimeType,
+      generatedBy: state.data.generatedBy,
+    });
+    return;
+  }
+  if (state.status === "error") {
+    sendJson(res, 200, {
+      status: "error",
+      message: "画像生成に失敗しました。少し時間をおいて再試行できます。",
+    });
+    return;
+  }
+  // pending or busy — the client should keep polling.
+  sendJson(res, 200, {
+    status: "pending",
+    message:
+      state.status === "busy"
+        ? "混み合っています。生成の順番を待っています…"
+        : "画像を生成しています（最大2〜3分）…",
+  });
 }
 
 function chatErrorResponse(err) {
@@ -474,7 +606,10 @@ export async function handleChatRoute(
     return;
   }
 
-  if (req.headers["x-health-app-token"] !== token) {
+  // AUTH (Codex audit S1): require a real, server-verified login session
+  // (ha_session) — NOT a shared token. Same-origin cookie is verified against the
+  // API Worker. Fail-closed.
+  if (!(await hasValidSession(req, options))) {
     sendJson(res, 401, { error: "unauthorized" });
     return;
   }
@@ -583,7 +718,9 @@ async function resolveStatic(urlPath) {
 
 async function handleStatic(req, res, options = {}) {
   const requestPath = req.url || "/";
-  const injectToken = configuredToken(options);
+  // AI is enabled when HEALTH_APP_TOKEN is configured; we inject only a NON-SECRET
+  // session-auth flag (never the token itself — Codex audit S1).
+  const aiEnabled = !!configuredToken(options);
   const file = await resolveStatic(requestPath);
   if (file && typeof file === "object" && file.status === 400) {
     res.writeHead(400, withSecurityHeaders({ "content-type": "text/plain; charset=utf-8" }));
@@ -609,12 +746,13 @@ async function handleStatic(req, res, options = {}) {
       const index = await resolveStatic("/");
       if (!index || typeof index !== "string") throw new Error("index not found");
       const buf = await readFile(index);
-      // Inject the shared access token (request-time) so a logged-in user gets
-      // the AI features without manually entering an access key.
-      const html = injectAppToken(buf.toString("utf8"), injectToken);
+      // Inject the NON-SECRET session-auth flag (request-time) so a logged-in user
+      // gets the AI features without manually entering an access key. The shared
+      // token is never injected (Codex audit S1).
+      const html = injectSessionAuthFlag(buf.toString("utf8"), aiEnabled);
       // HTML must NOT be heuristically cached by the browser/CDN (no Cache-Control
       // → browsers guess a TTL and serve a STALE shell, so a deploy's new bundle
-      // refs + the request-time token injection never reach the user; this is what
+      // refs + the request-time injection never reach the user; this is what
       // surfaced the "access-key screen on a logged-in session" report). Hashed
       // assets under _next/static stay immutable; only the navigation document is
       // marked always-revalidate.
@@ -632,15 +770,15 @@ async function handleStatic(req, res, options = {}) {
     // The service worker must never be cached by the CDN/browser — a stale SW
     // keeps controlling the installed PWA and blocks push-handler updates.
     if (file.endsWith("/sw.js")) headers["cache-control"] = "no-cache, no-store, must-revalidate";
-    // HTML pages (every route serves <route>/index.html): inject the shared
-    // access token at request time so a logged-in user gets the AI features with
-    // no manual key entry. The on-disk export stays token-free (no leak).
+    // HTML pages (every route serves <route>/index.html): inject the NON-SECRET
+    // session-auth flag at request time so a logged-in user gets the AI features
+    // with no manual key entry. The shared token is never injected (Codex audit S1).
     if (file.endsWith(".html")) {
       // Always-revalidate the navigation document (see HTML_CACHE_CONTROL): a
       // stale cached shell is exactly what made a logged-in user see the old
       // access-key screen and never receive a newly-deployed bundle.
       headers["cache-control"] = HTML_CACHE_CONTROL;
-      const html = injectAppToken(buf.toString("utf8"), injectToken);
+      const html = injectSessionAuthFlag(buf.toString("utf8"), aiEnabled);
       res.writeHead(200, headers);
       res.end(html);
       return;

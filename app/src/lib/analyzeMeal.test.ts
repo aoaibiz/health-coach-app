@@ -43,15 +43,16 @@ function fetchReturning(res: Response): typeof fetch {
 
 function setWindowLocalStorage(
   values: Record<string, string>,
-  opts: { injectedToken?: string } = {},
+  opts: { sessionAuth?: boolean } = {},
 ) {
   const store = new Map(Object.entries(values));
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: {
-      // Server-injected shared token (server/index.mjs sets this on window). When
-      // present it unlocks AI without a manual key (logged-in user).
-      __HEALTH_APP_TOKEN__: opts.injectedToken,
+      // Server-injected NON-SECRET session-auth flag (server/index.mjs sets this on
+      // window). When true it unlocks AI without a manual key (logged-in user); the
+      // ha_session cookie authorizes the request — no token is sent (Codex audit S1).
+      __HEALTH_APP_SESSION_AUTH__: opts.sessionAuth,
       localStorage: {
         getItem: (key: string) => store.get(key) ?? null,
         setItem: (key: string, value: string) => store.set(key, value),
@@ -84,18 +85,19 @@ describe("hasApiKey — access-key presence (unlocks AI features)", () => {
     expect(hasApiKey()).toBe(true);
   });
 
-  // Issue ②: a logged-in user on a server with HEALTH_APP_TOKEN configured gets
-  // window.__HEALTH_APP_TOKEN__ injected → AI is unlocked with NO manual key.
-  it("is true when the server injected a token, even with no stored key", () => {
-    setWindowLocalStorage({}, { injectedToken: "injected-shared-token" });
+  // Codex audit S1: a logged-in user on a server with HEALTH_APP_TOKEN configured
+  // gets window.__HEALTH_APP_SESSION_AUTH__=true → AI is unlocked with NO manual key
+  // (the session cookie authorizes the request; the shared token is never injected).
+  it("is true when the server set the session-auth flag, even with no stored key", () => {
+    setWindowLocalStorage({}, { sessionAuth: true });
     expect(hasApiKey()).toBe(true);
   });
 
-  it("falls back to the stored key when the server did not inject a token", () => {
-    // injectedToken undefined (env unset) → only the manual key counts.
+  it("falls back to the stored key when the server did not set the session flag", () => {
+    // sessionAuth undefined/false (env unset) → only the manual key counts.
     setWindowLocalStorage({ [API_TOKEN_STORAGE_KEY]: "my-own-key" });
     expect(hasApiKey()).toBe(true);
-    setWindowLocalStorage({}, { injectedToken: "" });
+    setWindowLocalStorage({}, { sessionAuth: false });
     expect(hasApiKey()).toBe(false);
   });
 });
@@ -440,31 +442,31 @@ describe("analyzeMeal — success", () => {
     expect(headers!.has("X-Health-App-Token")).toBe(false);
   });
 
-  // Issue ②: the server-injected token is sent even when no manual key is stored.
-  it("sends the SERVER-INJECTED token when no key is stored (login unlock)", async () => {
-    setWindowLocalStorage({}, { injectedToken: "injected-shared-token" });
+  // Codex audit S1: under session-auth (no manual key stored) NO X-Health-App-Token
+  // header is sent — the same-origin ha_session cookie authorizes the request.
+  it("omits X-Health-App-Token under session-auth when no key is stored", async () => {
+    setWindowLocalStorage({}, { sessionAuth: true });
     let headers: Headers;
     const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
       headers = new Headers(init?.headers);
       return new Response(JSON.stringify(apiResponse()), { status: 200 });
     }) as unknown as typeof fetch;
     await analyzeMeal({ text: "ごはん" }, { fetchImpl });
-    expect(headers!.get("X-Health-App-Token")).toBe("injected-shared-token");
+    expect(headers!.has("X-Health-App-Token")).toBe(false);
   });
 
-  // Issue ②: the injected token takes precedence over a stale stored one.
-  it("prefers the server-injected token over the stored key", async () => {
-    setWindowLocalStorage(
-      { [API_TOKEN_STORAGE_KEY]: "stale-stored" },
-      { injectedToken: "injected-shared-token" },
-    );
+  // A manually-stored own-key is still sent as the header (advanced path), even
+  // under session-auth (the server now authorizes on the session, but sending the
+  // own-key header is harmless and preserves the legacy own-key path).
+  it("still sends a manually-stored own-key as the header", async () => {
+    setWindowLocalStorage({ [API_TOKEN_STORAGE_KEY]: "my-own-key" }, { sessionAuth: true });
     let headers: Headers;
     const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
       headers = new Headers(init?.headers);
       return new Response(JSON.stringify(apiResponse()), { status: 200 });
     }) as unknown as typeof fetch;
     await analyzeMeal({ text: "ごはん" }, { fetchImpl });
-    expect(headers!.get("X-Health-App-Token")).toBe("injected-shared-token");
+    expect(headers!.get("X-Health-App-Token")).toBe("my-own-key");
   });
 });
 
@@ -600,8 +602,8 @@ describe("estimateSingleItem — DB-miss auto-estimate (honest 推定値, never 
 
 
 describe("generateMealImage - server bridge", () => {
-  it("sends X-Health-App-Token from resolveApiToken and returns a PNG Blob", async () => {
-    setWindowLocalStorage({}, { injectedToken: "injected-shared-token" });
+  it("sends a stored own-key as X-Health-App-Token and returns a PNG Blob", async () => {
+    setWindowLocalStorage({ [API_TOKEN_STORAGE_KEY]: "my-own-key" }, { sessionAuth: true });
     let headers: Headers;
     let bodyText = "";
     const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -617,17 +619,17 @@ describe("generateMealImage - server bridge", () => {
       );
     }) as unknown as typeof fetch;
     const blob = await generateMealImage({ text: "鮭定食" }, { fetchImpl });
-    expect(headers!.get("X-Health-App-Token")).toBe("injected-shared-token");
+    expect(headers!.get("X-Health-App-Token")).toBe("my-own-key");
     expect(JSON.parse(bodyText)).toEqual({ text: "鮭定食" });
     expect(blob.type).toBe("image/png");
     expect(await blob.text()).toBe("fake-png");
   });
 
-  it("maps 401 to the honest access-key setup message", async () => {
+  it("maps 401 to an honest login-required message (the route requires a session)", async () => {
     setWindowLocalStorage({});
     const fetchImpl = fetchReturning(new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 }));
     await expect(generateMealImage({ text: "ごはん" }, { fetchImpl })).rejects.toThrow(
-      "アクセスキーを設定してください",
+      "ログインが必要です",
     );
   });
 
@@ -637,5 +639,45 @@ describe("generateMealImage - server bridge", () => {
     await expect(generateMealImage({ text: "ごはん" }, { fetchImpl })).rejects.toThrow(
       "画像生成に失敗しました",
     );
+  });
+
+  it("polls while the async job is pending, then returns the PNG when done", async () => {
+    setWindowLocalStorage({ [API_TOKEN_STORAGE_KEY]: "k" }, { sessionAuth: true });
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      if (calls < 3) {
+        return new Response(JSON.stringify({ status: "pending", message: "生成中" }), { status: 200 });
+      }
+      return new Response(
+        JSON.stringify({
+          status: "done",
+          imageBase64: btoa("png-bytes"),
+          mimeType: "image/png",
+          generatedBy: "x",
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+    const blob = await generateMealImage(
+      { text: "唐揚げ" },
+      { fetchImpl, sleepImpl: async () => {}, pollIntervalMs: 1 },
+    );
+    expect(calls).toBe(3);
+    expect(blob.type).toBe("image/png");
+    expect(await blob.text()).toBe("png-bytes");
+  });
+
+  it("throws the honest server message when the async job reports status error", async () => {
+    setWindowLocalStorage({ [API_TOKEN_STORAGE_KEY]: "k" }, { sessionAuth: true });
+    const fetchImpl = fetchReturning(
+      new Response(
+        JSON.stringify({ status: "error", message: "画像生成に失敗しました。少し時間をおいて再試行できます。" }),
+        { status: 200 },
+      ),
+    );
+    await expect(
+      generateMealImage({ text: "ごはん" }, { fetchImpl, sleepImpl: async () => {} }),
+    ).rejects.toThrow("画像生成に失敗しました");
   });
 });
