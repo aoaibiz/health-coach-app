@@ -26,7 +26,6 @@ const WEIGHT_KEY = "health-app:weightLog:v1";
 const COACH_KEY = "health-app:coachSettings";
 const CHAT_KEY = "health-app:chat:v1";
 const API_TOKEN_KEY = "health-app:apiToken";
-const API_TOKEN_UPDATED_AT_KEY = "health-app:apiToken:updatedAt";
 const DELETIONS_KEY = "health-app:deletions:v1";
 
 /** Minimal window.localStorage shim on a node global (same pattern as
@@ -756,7 +755,7 @@ describe("cross-device delete — tombstones make a delete stick (no resurrectio
 //   set key → background push (PUT) → wipe local (delete/re-add the app) →
 //   mergeOnLogin (GET) → key RESTORED to local → hasApiKey() true. No re-entry.
 // ─────────────────────────────────────────────────────────────────────────────
-describe("apiToken (access key) — durable sync, restores after a device wipe", () => {
+describe("apiToken (access key) — intentionally NOT synced (Codex audit S1/S7)", () => {
   beforeEach(() => {
     vi.resetModules();
   });
@@ -765,80 +764,41 @@ describe("apiToken (access key) — durable sync, restores after a device wipe",
     vi.resetModules();
   });
 
-  it("set → PUT → clear local (device wipe) → mergeOnLogin → key restored, hasApiKey() true", async () => {
-    // ── Device A: the user sets their access key, sync is enabled, key pushes up.
-    const mapA = installLocalStorage({});
+  it("a locally-set key is NEVER pushed to the server (it must not reach D1)", async () => {
+    const map = installLocalStorage({});
     const server = makeFakeServer({});
-    const modA = await import("./syncData");
+    const mod = await import("./syncData");
     const { setApiToken } = await import("./apiTokenStore");
 
-    // Gate must be open before a background push fires (login-merge ran).
-    modA.setSyncCsrfToken("csrf");
-    await modA.mergeOnLogin({ csrfToken: "csrf", fetchImpl: server.fetchImpl });
+    mod.setSyncCsrfToken("csrf");
+    await mod.mergeOnLogin({ csrfToken: "csrf", fetchImpl: server.fetchImpl });
 
-    setApiToken("secret-access-key"); // settings form writes the key + updatedAt.
-    // Push it up through the gated path with our fake server's fetch.
-    await modA.mergeOnLogin({ csrfToken: "csrf", fetchImpl: server.fetchImpl });
+    setApiToken("secret-access-key"); // settings form writes the key locally.
+    const summary = await mod.mergeOnLogin({ csrfToken: "csrf", fetchImpl: server.fetchImpl });
 
-    // The server now holds the key envelope; the original local key is present.
-    expect(mapA.get(API_TOKEN_KEY)).toBe("secret-access-key");
-    expect((server.store["apiToken"] as { token: string }).token).toBe("secret-access-key");
-
-    // ── Device wipe: delete + re-add the app → local is empty again.
-    vi.resetModules();
-    const mapB = installLocalStorage({}); // fresh/empty device (no key locally)
-    const modB = await import("./syncData");
-    const { hasApiKey: hasApiKeyB } = await import("./analyzeMeal");
-    expect(mapB.has(API_TOKEN_KEY)).toBe(false);
-    expect(hasApiKeyB()).toBe(false); // key really is gone before restore.
-
-    // ── Login again: mergeOnLogin GETs the server blob and RESTORES the key.
-    modB.setSyncCsrfToken("csrf");
-    const summary = await modB.mergeOnLogin({
-      csrfToken: "csrf",
-      fetchImpl: server.fetchImpl,
-    });
-
-    expect(summary.apiToken.merged).toBe(true);
-    // Local now has the key back under the ORIGINAL key (every reader sees it).
-    expect(mapB.get(API_TOKEN_KEY)).toBe("secret-access-key");
-    expect(mapB.get(API_TOKEN_UPDATED_AT_KEY)).toBeTruthy();
-    // The existing presence check (used by the UI to unlock AI features) is true
-    // again — NO manual re-entry needed.
-    expect(hasApiKeyB()).toBe(true);
+    // The key stays LOCAL (no data loss) ...
+    expect(map.get(API_TOKEN_KEY)).toBe("secret-access-key");
+    // ... but it is NEVER sent to the server: there is no apiToken sync plan.
+    expect(server.store["apiToken"]).toBeUndefined();
+    expect(summary.apiToken).toBeUndefined();
+    expect(pushedFor(server.pushed, "apiToken")).toHaveLength(0);
   });
 
-  it("an empty server can NEVER clear a locally-set key (the #1 rule for the key too)", async () => {
-    const map = installLocalStorage({
-      [API_TOKEN_KEY]: "local-key",
-      [API_TOKEN_UPDATED_AT_KEY]: "2026-06-24T00:00:00Z",
+  it("a device wipe does NOT restore the key from the server (it was never stored)", async () => {
+    // Even if a server blob hypothetically held an old key, mergeOnLogin must NOT
+    // pull it — apiToken is no longer a synced section.
+    const mapB = installLocalStorage({});
+    const server = makeFakeServer({
+      apiToken: { token: "server-key", updatedAt: "2026-06-23T00:00:00Z" },
     });
-    const server = makeFakeServer({}); // GET returns data:null for apiToken
-    const { mergeOnLogin } = await import("./syncData");
+    const mod = await import("./syncData");
+    const { hasApiKey } = await import("./analyzeMeal");
 
-    await mergeOnLogin({ csrfToken: "csrf", fetchImpl: server.fetchImpl });
+    mod.setSyncCsrfToken("csrf");
+    const summary = await mod.mergeOnLogin({ csrfToken: "csrf", fetchImpl: server.fetchImpl });
 
-    // Local key untouched; the local key was pushed UP (server gains it).
-    expect(map.get(API_TOKEN_KEY)).toBe("local-key");
-    expect((server.store["apiToken"] as { token: string }).token).toBe("local-key");
-  });
-
-  it("a GET FAILURE leaves the key untouched and pushes nothing for the section", async () => {
-    const map = installLocalStorage({
-      [API_TOKEN_KEY]: "local-key",
-      [API_TOKEN_UPDATED_AT_KEY]: "2026-06-24T00:00:00Z",
-    });
-    const server = makeFakeServer(
-      { apiToken: { token: "server-key", updatedAt: "2026-06-23T00:00:00Z" } },
-      { failGet: new Set(["apiToken"]) },
-    );
-    const { mergeOnLogin } = await import("./syncData");
-
-    const summary = await mergeOnLogin({ csrfToken: "csrf", fetchImpl: server.fetchImpl });
-
-    expect(summary.apiToken.merged).toBe(false);
-    expect(summary.apiToken.error).toBeTruthy();
-    expect(map.get(API_TOKEN_KEY)).toBe("local-key"); // untouched
-    expect(pushedFor(server.pushed, "apiToken")).toHaveLength(0); // never pushed
+    expect(summary.apiToken).toBeUndefined(); // no apiToken plan ran
+    expect(mapB.has(API_TOKEN_KEY)).toBe(false); // not restored to local
+    expect(hasApiKey()).toBe(false); // no session flag + no stored key
   });
 });

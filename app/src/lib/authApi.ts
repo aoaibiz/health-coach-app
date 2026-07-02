@@ -1,7 +1,7 @@
 // Thin client for the live auth backend (Stage 1).
 //
-// The app is served from https://health.mogubusi.trade and the API lives on the
-// sibling subdomain https://health-api.mogubusi.trade. Because it is a DIFFERENT
+// The app is served from https://health-coach.example.com and the API lives on the
+// sibling subdomain https://health-coach-api.example.com. Because it is a DIFFERENT
 // origin, EVERY auth request must use `credentials: "include"` so the HttpOnly
 // session cookie is sent/received. The browser attaches the Origin header
 // automatically; the API CORS-allows our origin with credentials.
@@ -14,12 +14,13 @@
 import type { AuthUser } from "./authState";
 
 /**
- * Single source of truth for the API base URL. Overridable at build time via
- * NEXT_PUBLIC_HEALTH_API (so Stage 2 + non-prod envs are a one-line change),
- * defaulting to the live production API.
+ * Single source of truth for the API base URL. Set at build time via
+ * NEXT_PUBLIC_HEALTH_API (e.g. https://health-coach-api.example.com).
+ * Defaults to "" = same-origin relative paths, for deployments that serve
+ * the app and the API from one origin (or behind a reverse proxy).
  */
 export const HEALTH_API_BASE = (
-  process.env.NEXT_PUBLIC_HEALTH_API ?? "https://health-api.mogubusi.trade"
+  process.env.NEXT_PUBLIC_HEALTH_API ?? ""
 ).replace(/\/$/, "");
 
 function apiUrl(path: string): string {

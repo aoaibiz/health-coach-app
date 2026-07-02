@@ -123,8 +123,8 @@ function Bubble({
           ? [message.photoId]
           : [];
     return (
-      <div className="flex items-end justify-end gap-2">
-        <div className="max-w-[78%] rounded-2xl rounded-br-sm bg-accent px-3.5 py-2.5 text-sm leading-relaxed text-white shadow-sm dark:bg-accent-dark">
+      <div className="flex animate-fade-in-up items-end justify-end gap-2">
+        <div className="max-w-[78%] rounded-2xl rounded-br-sm bg-gradient-to-b from-accent-light to-accent px-3.5 py-2.5 text-sm leading-relaxed text-white shadow-sm dark:from-accent dark:to-accent-dark">
           {photoIds.length === 1 ? (
             <BubblePhoto photoId={photoIds[0]} />
           ) : photoIds.length > 1 ? (
@@ -141,7 +141,7 @@ function Bubble({
     );
   }
   return (
-    <div className="flex flex-col items-start gap-1">
+    <div className="flex animate-fade-in-up flex-col items-start gap-1">
       <div className="flex items-end justify-start gap-2">
         <CoachAvatar settings={coachSettings} />
         <div className="max-w-[78%] rounded-2xl rounded-bl-sm border border-slate-200/70 bg-white px-3.5 py-2.5 text-sm leading-relaxed text-slate-800 shadow-sm dark:border-navy-700 dark:bg-navy-800 dark:text-navy-50">
@@ -170,7 +170,7 @@ function ThinkingBubble({
   coachSettings: CoachSettings;
 }) {
   return (
-    <div className="flex items-end justify-start gap-2">
+    <div className="flex animate-fade-in-up items-end justify-start gap-2">
       <CoachAvatar settings={coachSettings} />
       <div className="rounded-2xl rounded-bl-sm border border-slate-200/70 bg-white px-3.5 py-2.5 text-sm text-slate-400 shadow-sm dark:border-navy-700 dark:bg-navy-800 dark:text-navy-300">
         <span className="inline-flex items-center gap-1.5">
@@ -215,15 +215,27 @@ function KeyRequiredBanner({ coachName }: { coachName: string }) {
   );
 }
 
+/** Tap-to-ask starters for the empty conversation. Each goes through the SAME
+ *  send() path as a typed message — presentation-only sugar, no new logic. */
+const STARTER_PROMPTS = [
+  "今日の食事メニューを提案して",
+  "あと何を食べたらいい？",
+  "自宅でできる筋トレメニューを作って",
+  "最近の記録を振り返って",
+];
+
 function EmptyState({
   coachSettings,
   coachName,
+  onPick,
 }: {
   coachSettings: CoachSettings;
   coachName: string;
+  /** Present when the coach is usable (access key set) — enables the starters. */
+  onPick?: (text: string) => void;
 }) {
   return (
-    <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
+    <div className="flex animate-fade-in-up flex-col items-center justify-center px-6 py-14 text-center">
       <CoachAvatar settings={coachSettings} className="mb-3 h-16 w-16" />
       <p className="text-sm font-semibold text-slate-600 dark:text-navy-100">
         {coachName}に相談しよう
@@ -231,6 +243,20 @@ function EmptyState({
       <p className="mt-1 max-w-[18rem] text-xs leading-relaxed text-slate-400 dark:text-navy-400">
         今日の食事や運動、次に何を食べるとよいかなど、気軽に聞いてみてください。
       </p>
+      {onPick && (
+        <div className="stagger mt-5 flex max-w-sm flex-wrap items-center justify-center gap-2">
+          {STARTER_PROMPTS.map((prompt) => (
+            <button
+              key={prompt}
+              type="button"
+              onClick={() => onPick(prompt)}
+              className="chip min-h-[2.75rem] border border-slate-200 bg-white/80 text-slate-600 shadow-sm backdrop-blur-sm hover:border-accent/40 hover:bg-accent/5 hover:text-accent dark:border-navy-700 dark:bg-navy-800/80 dark:text-navy-200 dark:hover:border-accent-light/40 dark:hover:text-accent-light"
+            >
+              {prompt}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -323,17 +349,24 @@ export function ChatView() {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Header row: title + clear */}
-      <div className="mb-2 flex items-center justify-between">
-        <h1 className="flex items-center gap-1.5 text-base font-bold tracking-tight">
-          <CoachAvatar settings={coachSettings} className="h-7 w-7" />
-          {coachName}
-        </h1>
+      {/* Header row: coach identity + clear */}
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <CoachAvatar settings={coachSettings} className="h-9 w-9" />
+          <div className="min-w-0">
+            <h1 className="truncate text-base font-bold leading-tight tracking-tight">
+              {coachName}
+            </h1>
+            <p className="text-[11px] leading-tight text-slate-400 dark:text-navy-400">
+              AIコーチ・写真を送ると食事を記録
+            </p>
+          </div>
+        </div>
         {messages.length > 0 && (
           <button
             type="button"
             onClick={clear}
-            className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-slate-400 transition active:scale-95 hover:text-slate-600 dark:text-navy-400 dark:hover:text-navy-200"
+            className="flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-slate-400 transition active:scale-95 hover:text-slate-600 dark:text-navy-400 dark:hover:text-navy-200"
           >
             <TrashIcon className="h-3.5 w-3.5" />
             履歴を消去
@@ -350,7 +383,13 @@ export function ChatView() {
         className="no-scrollbar flex-1 min-h-0 space-y-3 overflow-y-auto pb-2"
       >
         {ready && messages.length === 0 && !sending ? (
-          <EmptyState coachSettings={coachSettings} coachName={coachName} />
+          <EmptyState
+            coachSettings={coachSettings}
+            coachName={coachName}
+            // Starters use the exact same send path as a typed message; hidden
+            // while the access key is missing (sends would only 401).
+            onPick={needsKey ? undefined : (text) => void send(text)}
+          />
         ) : (
           messages.map((m) => (
             <Bubble key={m.id} message={m} profile={profile} coachSettings={coachSettings} />
@@ -371,7 +410,7 @@ export function ChatView() {
       </div>
 
       {error && (
-        <p className="mb-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-950/40 dark:text-red-300">
+        <p className="mb-2 animate-fade-in rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-950/40 dark:text-red-300">
           {error}
         </p>
       )}
@@ -440,7 +479,7 @@ export function ChatView() {
           onClick={handleSend}
           disabled={!canSend}
           aria-label="送信"
-          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-accent text-white shadow-sm transition active:scale-95 hover:bg-accent-dark disabled:opacity-40 disabled:active:scale-100"
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-b from-accent-light to-accent text-white shadow-glow-accent transition duration-200 ease-spring active:scale-95 hover:from-accent hover:to-accent-dark disabled:opacity-40 disabled:shadow-none disabled:active:scale-100"
         >
           <SendIcon className="h-5 w-5" />
         </button>

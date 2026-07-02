@@ -921,9 +921,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             sleep: loadSleepLogs(),
             date: sleepDate.dateKey ?? undefined,
           });
-          saveSleepLogs(applied.sleep);
-          loggedSleep = true;
-          if (sleepDate.dateKey) backdatedDates.add(sleepDate.dateKey);
+          // Only mark sleep RECORDED when the local write actually PERSISTED
+          // (Codex audit C1). A localStorage failure (quota / private mode) now
+          // throws from saveSleepLogs → loggedSleep stays false → the `recorded`
+          // gate below keeps the coach reply honest (no phantom "睡眠を記録しました").
+          try {
+            saveSleepLogs(applied.sleep);
+            loggedSleep = true;
+            if (sleepDate.dateKey) backdatedDates.add(sleepDate.dateKey);
+          } catch {
+            loggedSleep = false;
+          }
         }
 
         // RECORDING-RELIABILITY GUARD (the "if it says 記録しました, it IS recorded"

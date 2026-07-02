@@ -51,8 +51,14 @@ const AVATAR_QUALITY = 0.8;
  *  bigger is re-encoded at lower quality, then rejected if still over. */
 export const AVATAR_MAX_DATA_URL_CHARS = 180_000;
 
-const MEAL_GENERATED_ICON_EDGE = 192;
-const MEAL_GENERATED_ICON_QUALITY = 0.82;
+const MEAL_GENERATED_ICON_EDGES = [192, 160, 128, 96] as const;
+const MEAL_GENERATED_ICON_ENCODERS = [
+  ["image/webp", 0.82],
+  ["image/webp", 0.68],
+  ["image/jpeg", 0.72],
+  ["image/jpeg", 0.56],
+  ["image/png", undefined],
+] as const;
 export const MEAL_GENERATED_IMAGE_MAX_DATA_URL_CHARS = 120_000;
 const MEAL_GENERATED_IMAGE_DATA_URL_RE =
   /^data:image\/(?:webp|jpeg|png);base64,[A-Za-z0-9+/]+={0,2}$/;
@@ -122,35 +128,33 @@ export async function compressGeneratedMealImageToDataUrl(blob: Blob): Promise<s
   }
 
   const canvas = document.createElement("canvas");
-  canvas.width = MEAL_GENERATED_ICON_EDGE;
-  canvas.height = MEAL_GENERATED_ICON_EDGE;
   const ctx = canvas.getContext("2d");
   if (!ctx) {
     bitmap.close?.();
     return null;
   }
 
-  const scale = Math.min(
-    MEAL_GENERATED_ICON_EDGE / bitmap.width,
-    MEAL_GENERATED_ICON_EDGE / bitmap.height,
-  );
-  const width = Math.max(1, Math.round(bitmap.width * scale));
-  const height = Math.max(1, Math.round(bitmap.height * scale));
-  const x = Math.round((MEAL_GENERATED_ICON_EDGE - width) / 2);
-  const y = Math.round((MEAL_GENERATED_ICON_EDGE - height) / 2);
-  ctx.clearRect(0, 0, MEAL_GENERATED_ICON_EDGE, MEAL_GENERATED_ICON_EDGE);
-  ctx.drawImage(bitmap, x, y, width, height);
-  bitmap.close?.();
+  try {
+    for (const edge of MEAL_GENERATED_ICON_EDGES) {
+      canvas.width = edge;
+      canvas.height = edge;
+      const scale = Math.min(edge / bitmap.width, edge / bitmap.height);
+      const width = Math.max(1, Math.round(bitmap.width * scale));
+      const height = Math.max(1, Math.round(bitmap.height * scale));
+      const x = Math.round((edge - width) / 2);
+      const y = Math.round((edge - height) / 2);
+      ctx.clearRect(0, 0, edge, edge);
+      ctx.drawImage(bitmap, x, y, width, height);
 
-  for (const [type, quality] of [
-    ["image/webp", MEAL_GENERATED_ICON_QUALITY],
-    ["image/jpeg", 0.76],
-    ["image/png", undefined],
-  ] as const) {
-    const url = canvas.toDataURL(type, quality);
-    if (isValidGeneratedMealImageDataUrl(url)) {
-      return url;
+      for (const [type, quality] of MEAL_GENERATED_ICON_ENCODERS) {
+        const url = canvas.toDataURL(type, quality);
+        if (isValidGeneratedMealImageDataUrl(url)) {
+          return url;
+        }
+      }
     }
+  } finally {
+    bitmap.close?.();
   }
 
   return null;

@@ -139,15 +139,16 @@ export function loadCoachSettings(): CoachSettings {
  *  login-merge has run (the wipe fuse); never throws. */
 export function saveCoachSettings(settings: CoachSettings): void {
   if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(
-      COACH_SETTINGS_KEY,
-      JSON.stringify(sanitizeCoachSettings(settings)),
-    );
-  } catch {
-    /* quota/serialisation errors are non-fatal for settings */
-  }
-  // Best-effort backup (gated by syncData's merge fuse; no-op when logged out).
+  // NO SWALLOW on the local write: a failed setItem (quota / private mode) MUST
+  // propagate so the form never transitions to the "設定済み" view for settings that
+  // did not persist (phantom-success — Codex audit C3). Mirrors storage.ts writeJSON.
+  window.localStorage.setItem(
+    COACH_SETTINGS_KEY,
+    JSON.stringify(sanitizeCoachSettings(settings)),
+  );
+  // Best-effort SERVER backup stays swallowed — local persisted, so this is not a
+  // failed save; the next flush/login retries it (gated by syncData's merge fuse;
+  // no-op when logged out).
   try {
     pushSectionBestEffort("coachSettings");
   } catch {

@@ -40,17 +40,29 @@ export function useSleep(date: string) {
   // first paint before the effect runs is fine — store starts {} → null).
   const sleep: SleepLog | null = store[date] ?? null;
 
+  // Returns whether the save actually PERSISTED. A localStorage failure (quota /
+  // private mode) propagates from saveSleepForDate; we catch it and return false so
+  // the page shows a real error instead of a phantom "記録しました" (Codex audit C1).
   const save = useCallback(
-    (bedtime: string, wakeTime: string) => {
-      const next = saveSleepForDate(date, bedtime, wakeTime);
-      setStore(next);
+    (bedtime: string, wakeTime: string): boolean => {
+      try {
+        const next = saveSleepForDate(date, bedtime, wakeTime);
+        setStore(next);
+        return true;
+      } catch {
+        return false; // not persisted — caller must not claim success.
+      }
     },
     [date],
   );
 
   const clear = useCallback(() => {
-    const next = deleteSleepForDate(date);
-    setStore(next);
+    try {
+      const next = deleteSleepForDate(date);
+      setStore(next);
+    } catch {
+      /* a failed clear leaves the record; never surface a false "deleted" state */
+    }
   }, [date]);
 
   return { sleep, ready, save, clear, reload: () => setStore(loadSleepLogs()) };

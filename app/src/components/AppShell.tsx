@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTheme } from "./ThemeProvider";
@@ -8,43 +7,89 @@ import { useSelectedDate } from "./SelectedDateProvider";
 import { useAuth } from "./auth/AuthProvider";
 import { toDateKey } from "@/lib/date";
 import {
-  CalendarIcon,
   ChartIcon,
   ChatIcon,
-  CloseIcon,
   DumbbellIcon,
   FlameIcon,
+  HomeIcon,
   MealIcon,
   MoonIcon,
   SunIcon,
   UserIcon,
 } from "./icons";
 
-// CHAT is the home/landing (path "/" and "/chat" both render the chat). The
-// other features are SUB — reachable from the menu drawer below, not co-equal
-// primary tabs.
-const SUB_PAGES = [
+/*
+ * ── Information architecture (2026-07 re-imagining) ─────────────────────────
+ * 5 always-visible primary destinations (one tap to everything, no drawer):
+ *   ホーム(/)   — 今日: today-at-a-glance hero, quick-log, streak, weight, sleep
+ *   食事(/meal) — meal log (photo/text → AI解析), the most frequent action
+ *   コーチ(/chat) — 健康マン AI coach (raised centre button)
+ *   運動(/workout) — strength log + GPS有酸素 launcher (/cardio keeps its screen)
+ *   データ(/data) — trends(履歴・傾向) + カレンダー merged into one hub
+ * プロフィール stays in the header (mobile) / sidebar footer (desktop).
+ * /dashboard renders the home; /history & /calendar render the data hub —
+ * every old URL keeps working.
+ */
+interface NavItem {
+  href: string;
+  label: string;
+  Icon: (p: React.SVGProps<SVGSVGElement>) => JSX.Element;
+  /** Active-state matcher for THIS tab (desktop sidebar; narrow). */
+  match: (p: string) => boolean;
+  /** Mobile matcher — folds satellite pages (有酸素→運動, 睡眠→ホーム) into the
+   *  nearest tab so the bar always shows where you are. */
+  broad: (p: string) => boolean;
+  /** The raised centre button (コーチ). */
+  center?: boolean;
+}
+
+const PRIMARY_NAV: NavItem[] = [
   {
-    href: "/dashboard",
-    label: "成果",
-    Icon: ChartIcon,
-    match: (p: string) => p.startsWith("/dashboard"),
+    href: "/",
+    label: "ホーム",
+    Icon: HomeIcon,
+    match: (p) => p === "/" || p.startsWith("/dashboard"),
+    broad: (p) => p === "/" || p.startsWith("/dashboard") || p.startsWith("/sleep"),
   },
   {
     href: "/meal",
     label: "食事",
     Icon: MealIcon,
-    match: (p: string) => p.startsWith("/meal"),
+    match: (p) => p.startsWith("/meal"),
+    broad: (p) => p.startsWith("/meal"),
+  },
+  {
+    href: "/chat",
+    label: "コーチ",
+    Icon: ChatIcon,
+    match: (p) => p.startsWith("/chat"),
+    broad: (p) => p.startsWith("/chat"),
+    center: true,
   },
   {
     href: "/workout",
     label: "運動",
     Icon: DumbbellIcon,
-    match: (p: string) => p.startsWith("/workout"),
+    match: (p) => p.startsWith("/workout"),
+    broad: (p) => p.startsWith("/workout") || p.startsWith("/cardio"),
   },
   {
+    href: "/data",
+    label: "データ",
+    Icon: ChartIcon,
+    match: (p) =>
+      p.startsWith("/data") || p.startsWith("/history") || p.startsWith("/calendar"),
+    broad: (p) =>
+      p.startsWith("/data") || p.startsWith("/history") || p.startsWith("/calendar"),
+  },
+];
+
+/** Desktop-only satellite links (their own rows so a wide screen reaches them
+ *  directly; on mobile they're one tap inside ホーム / 運動). */
+const SATELLITE_NAV = [
+  {
     href: "/cardio",
-    label: "有酸素",
+    label: "有酸素（GPS計測）",
     Icon: FlameIcon,
     match: (p: string) => p.startsWith("/cardio"),
   },
@@ -54,23 +99,11 @@ const SUB_PAGES = [
     Icon: MoonIcon,
     match: (p: string) => p.startsWith("/sleep"),
   },
-  {
-    href: "/calendar",
-    label: "カレンダー",
-    Icon: CalendarIcon,
-    match: (p: string) => p.startsWith("/calendar"),
-  },
-  {
-    href: "/history",
-    label: "履歴・傾向",
-    Icon: ChartIcon,
-    match: (p: string) => p.startsWith("/history"),
-  },
 ];
 
-/** Chat is "home": active on both "/" and "/chat". */
-function isChatHome(p: string): boolean {
-  return p === "/" || p.startsWith("/chat");
+/** The chat screen locks its own scroll (message list scrolls, page doesn't). */
+function isChatPage(p: string): boolean {
+  return p.startsWith("/chat");
 }
 
 function ThemeToggle() {
@@ -89,8 +122,7 @@ function ThemeToggle() {
 }
 
 /** The app's brand mark — a small rounded-square "leaf/spark" badge in the
- *  accent gradient. Pure presentation; gives the wordmark an iconic anchor
- *  (the kind of mark an App Store listing needs). */
+ *  accent gradient. Pure presentation; gives the wordmark an iconic anchor. */
 function BrandMark() {
   return (
     <span
@@ -104,34 +136,7 @@ function BrandMark() {
   );
 }
 
-/** Hamburger / grid icon for the sub-pages menu (kept inline to avoid touching
- *  the shared icon set). */
-function MenuIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <line x1="3" y1="6" x2="21" y2="6" />
-      <line x1="3" y1="12" x2="21" y2="12" />
-      <line x1="3" y1="18" x2="21" y2="18" />
-    </svg>
-  );
-}
-
-/** All primary destinations (chat-home + the sub-pages) as ONE list, used by the
- *  desktop sidebar so every feature is a visible, co-equal nav item on a wide
- *  screen (no hidden メニュー drawer). Mobile keeps the compact home/メニュー nav. */
-const DESKTOP_NAV = [
-  {
-    href: "/",
-    label: "ホーム（チャット）",
-    Icon: ChatIcon,
-    match: isChatHome,
-  },
-  ...SUB_PAGES,
-];
-
-/** Shared active/inactive styling for a desktop sidebar nav item. The active
- *  item gets a soft gradient pill + accent glow; inactive items slide a hair to
- *  the right on hover — the small motion cue that reads as "polished". */
+/** Shared active/inactive styling for a desktop sidebar nav item. */
 function sidebarItemClass(active: boolean): string {
   return `group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold transition duration-200 ease-spring active:scale-[0.98] ${
     active
@@ -142,10 +147,9 @@ function sidebarItemClass(active: boolean): string {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const chatHome = isChatHome(pathname);
+  const chat = isChatPage(pathname);
   const { logout, state } = useAuth();
   const { setDate } = useSelectedDate();
-  const [menuOpen, setMenuOpen] = useState(false);
   const resetDateToToday = () => setDate(toDateKey());
   // ログイン中のメールアドレス（あれば）— どのアカウントか常に分かるよう nav に表示。
   const email =
@@ -154,25 +158,42 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       : "";
 
   return (
-    // Responsive shell: on mobile a single centered column (max-w-md, unchanged);
-    // on desktop (lg+) a left sidebar + a wide content column so the app reads as
-    // a real desktop app instead of a stretched phone layout.
+    // Responsive shell: on mobile a single centered column (max-w-md);
+    // on desktop (lg+) a left sidebar + a wide content column.
     <div className="mx-auto flex h-[100dvh] w-full max-w-md flex-col overflow-hidden lg:max-w-6xl lg:flex-row">
-      {/* Desktop sidebar — hidden on mobile (lg:flex). Holds the brand, the full
-          nav, and account actions, so the wide screen has its own chrome. */}
+      {/* Desktop sidebar — hidden on mobile (lg:flex). */}
       <aside className="hidden shrink-0 flex-col border-r border-slate-200/60 bg-white/50 backdrop-blur-xl lg:flex lg:w-64 xl:w-72 dark:border-navy-800/70 dark:bg-navy-950/40">
         <div className="flex h-16 items-center gap-2.5 px-6">
           <BrandMark />
           <span className="text-xl font-bold tracking-tight">Health</span>
         </div>
         <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-2">
-          {DESKTOP_NAV.map(({ href, label, Icon, match }) => {
+          {PRIMARY_NAV.map(({ href, label, Icon, match }) => {
             const active = match(pathname);
             return (
               <Link
                 key={href}
                 href={href}
-                onClick={href === "/" ? undefined : resetDateToToday}
+                onClick={href === "/chat" ? undefined : resetDateToToday}
+                aria-current={active ? "page" : undefined}
+                className={sidebarItemClass(active)}
+              >
+                <Icon className="h-5 w-5 shrink-0 transition-transform duration-200 ease-spring group-hover:scale-110" />
+                <span>{label}</span>
+              </Link>
+            );
+          })}
+          <p className="px-3 pb-1 pt-4 text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-navy-500">
+            記録ツール
+          </p>
+          {SATELLITE_NAV.map(({ href, label, Icon, match }) => {
+            const active = match(pathname);
+            return (
+              <Link
+                key={href}
+                href={href}
+                onClick={resetDateToToday}
+                aria-current={active ? "page" : undefined}
                 className={sidebarItemClass(active)}
               >
                 <Icon className="h-5 w-5 shrink-0 transition-transform duration-200 ease-spring group-hover:scale-110" />
@@ -194,6 +215,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           )}
           <Link
             href="/profile"
+            aria-current={pathname.startsWith("/profile") ? "page" : undefined}
             className={sidebarItemClass(pathname.startsWith("/profile"))}
           >
             <UserIcon className="h-5 w-5 shrink-0" />
@@ -215,175 +237,108 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
       </aside>
 
-      {/* Main column (header + content + mobile nav). min-w-0 lets it shrink/grow
-          correctly beside the sidebar; flex-col keeps the locked-viewport layout. */}
+      {/* Main column (header + content + mobile nav). */}
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-      {/* Header — in-flow row above the scroll region; stays visible as a sibling.
-          Hidden on desktop where the sidebar carries the brand + actions. */}
-      <header className="shrink-0 border-b border-slate-200/60 bg-white/70 backdrop-blur-xl lg:hidden dark:border-navy-800/70 dark:bg-navy-950/70">
-        <div className="flex h-14 items-center justify-between gap-2 px-5">
-          <span className="flex shrink-0 items-center gap-2 text-lg font-bold tracking-tight">
-            <BrandMark />
-            Health
-          </span>
-          <div className="flex min-w-0 items-center gap-2">
-            {/* ログイン中のアカウント（メール）を常に表示 — どの端末でもどのアカウントで
-                使っているか一目で分かるようにし、別アカウントへの取り違えを防ぐ。タップで
-                プロフィールへ。email が無い／未ログインのときはアイコンのみ（捏造しない）。 */}
-            <Link
-              href="/profile"
-              aria-label={email ? `プロフィール（ログイン中: ${email}）` : "プロフィール"}
-              title={email || undefined}
-              className={`flex min-w-0 items-center gap-1.5 rounded-full border transition active:scale-95 ${
-                email ? "max-w-[9.5rem] px-2.5 py-1.5" : "h-9 w-9 justify-center"
-              } ${
-                pathname.startsWith("/profile")
-                  ? "border-accent bg-accent/10 text-accent dark:border-accent-light dark:bg-accent-light/15 dark:text-accent-light"
-                  : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-navy-700 dark:bg-navy-800 dark:text-navy-100 dark:hover:bg-navy-700"
-              }`}
-            >
-              <UserIcon className="h-5 w-5 shrink-0" />
-              {email && <span className="truncate text-xs font-semibold">{email}</span>}
-            </Link>
-            <ThemeToggle />
-          </div>
-        </div>
-      </header>
-
-      {/* Content — scrolls inside the locked viewport; min-h-0 lets the flex child
-          shrink below content size so the inner area (not the page) scrolls. On
-          desktop the readable content is centered + wider (not edge-to-edge) so a
-          1440px screen doesn't stretch cards across the full width. */}
-      <main className={`flex-1 min-h-0 px-4 pt-4 lg:px-8 lg:pt-8 ${chatHome ? "overflow-hidden" : "overflow-y-auto"}`}>
-        <div className="mx-auto h-full w-full lg:max-w-3xl xl:max-w-4xl">{children}</div>
-      </main>
-
-      {/* Bottom nav: CHAT is home (primary). The other pages live behind メニュー.
-          In-flow row at the bottom of the flex column. Hidden on desktop (the
-          sidebar replaces it). */}
-      <nav className="shrink-0 border-t border-slate-200/60 bg-white/80 backdrop-blur-xl lg:hidden dark:border-navy-800/70 dark:bg-navy-900/80">
-        <div className="grid grid-cols-2 px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2">
-          {(() => {
-            const homeActive = isChatHome(pathname);
-            const menuActive = SUB_PAGES.some((t) => t.match(pathname));
-            return (
-              <>
-                <Link
-                  href="/"
-                  className={`relative flex flex-col items-center gap-1 rounded-xl py-1.5 text-xs font-semibold transition duration-200 ease-spring active:scale-95 ${
-                    homeActive
-                      ? "text-accent dark:text-accent-light"
-                      : "text-slate-400 hover:text-slate-600 dark:text-navy-300 dark:hover:text-navy-100"
-                  }`}
-                >
-                  {homeActive && (
-                    <span aria-hidden className="absolute -top-2 h-1 w-8 rounded-full bg-accent dark:bg-accent-light" />
-                  )}
-                  <ChatIcon className={`h-6 w-6 transition-transform duration-200 ease-spring ${homeActive ? "scale-110" : ""}`} />
-                  <span>ホーム（チャット）</span>
-                </Link>
-                <button
-                  type="button"
-                  onClick={() => {
-                    resetDateToToday();
-                    setMenuOpen(true);
-                  }}
-                  aria-label="メニューを開く"
-                  className={`relative flex flex-col items-center gap-1 rounded-xl py-1.5 text-xs font-medium transition duration-200 ease-spring active:scale-95 ${
-                    menuActive
-                      ? "text-accent dark:text-accent-light"
-                      : "text-slate-400 hover:text-slate-600 dark:text-navy-300 dark:hover:text-navy-100"
-                  }`}
-                >
-                  {menuActive && (
-                    <span aria-hidden className="absolute -top-2 h-1 w-8 rounded-full bg-accent dark:bg-accent-light" />
-                  )}
-                  <MenuIcon className={`h-6 w-6 transition-transform duration-200 ease-spring ${menuActive ? "scale-110" : ""}`} />
-                  <span>メニュー</span>
-                </button>
-              </>
-            );
-          })()}
-        </div>
-      </nav>
-      </div>
-
-      {/* Menu drawer — the demoted-but-reachable sub-pages + logout. Mobile-only
-          (the desktop sidebar shows every page directly). */}
-      {menuOpen && (
-        <div className="fixed inset-0 z-30 flex flex-col justify-end lg:hidden">
-          {/* Backdrop */}
-          <button
-            type="button"
-            aria-label="メニューを閉じる"
-            onClick={() => setMenuOpen(false)}
-            className="absolute inset-0 animate-fade-in bg-slate-900/40 backdrop-blur-sm"
-          />
-          {/* Sheet */}
-          <div className="relative mx-auto w-full max-w-md animate-fade-in-up rounded-t-3xl border-t border-slate-200/70 bg-white/95 p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] shadow-2xl backdrop-blur-xl dark:border-navy-800 dark:bg-navy-900/95">
-            {/* grab handle */}
-            <span aria-hidden className="mx-auto mb-3 block h-1 w-10 rounded-full bg-slate-300 dark:bg-navy-700" />
-            <div className="mb-4 flex items-center justify-between">
-              <div className="min-w-0">
-                <span className="text-sm font-bold tracking-tight text-slate-700 dark:text-navy-100">
-                  メニュー
-                </span>
-                {email && (
-                  <span
-                    className="block max-w-[220px] truncate text-[11px] font-medium text-slate-400 dark:text-navy-400"
-                    title={email}
-                  >
-                    {email}
-                  </span>
-                )}
-              </div>
-              <button
-                type="button"
-                onClick={() => setMenuOpen(false)}
-                aria-label="閉じる"
-                className="flex h-8 w-8 items-center justify-center rounded-full text-slate-400 transition active:scale-95 hover:bg-slate-100 dark:text-navy-300 dark:hover:bg-navy-800"
+        {/* Mobile header — brand + account + theme. Hidden on desktop. */}
+        <header className="shrink-0 lg:hidden">
+          <div className="flex h-14 items-center justify-between gap-2 px-5">
+            <span className="flex shrink-0 items-center gap-2 text-lg font-bold tracking-tight">
+              <BrandMark />
+              Health
+            </span>
+            <div className="flex min-w-0 items-center gap-2">
+              {/* ログイン中のアカウント（メール）を常に表示 — 取り違え防止。タップで
+                  プロフィールへ。email が無い／未ログインのときはアイコンのみ。 */}
+              <Link
+                href="/profile"
+                aria-label={email ? `プロフィール（ログイン中: ${email}）` : "プロフィール"}
+                title={email || undefined}
+                className={`flex min-w-0 items-center gap-1.5 rounded-full border backdrop-blur-md transition active:scale-95 ${
+                  email ? "max-w-[9.5rem] px-2.5 py-1.5" : "h-9 w-9 justify-center"
+                } ${
+                  pathname.startsWith("/profile")
+                    ? "border-accent bg-accent/10 text-accent dark:border-accent-light dark:bg-accent-light/15 dark:text-accent-light"
+                    : "border-slate-200 bg-white/80 text-slate-700 hover:bg-slate-50 dark:border-navy-700 dark:bg-navy-800/80 dark:text-navy-100 dark:hover:bg-navy-700"
+                }`}
               >
-                <CloseIcon className="h-4 w-4" />
-              </button>
+                <UserIcon className="h-5 w-5 shrink-0" />
+                {email && <span className="truncate text-xs font-semibold">{email}</span>}
+              </Link>
+              <ThemeToggle />
             </div>
+          </div>
+        </header>
 
-            <div className="grid grid-cols-2 gap-2.5">
-              {SUB_PAGES.map(({ href, label, Icon, match }) => {
-                const active = match(pathname);
+        {/* Content — scrolls inside the locked viewport (except chat, which owns
+            its scroll). Centered + width-capped on desktop. */}
+        <main className={`flex-1 min-h-0 px-4 pt-2 lg:px-8 lg:pt-8 ${chat ? "overflow-hidden pb-2" : "overflow-y-auto"}`}>
+          <div className="mx-auto h-full w-full lg:max-w-3xl xl:max-w-4xl">{children}</div>
+        </main>
+
+        {/* Mobile bottom nav — a floating 5-tab bar: every primary destination is
+            ONE tap (no menu drawer). コーチ is the raised centre button. */}
+        <nav className="shrink-0 px-3 pb-[max(0.6rem,env(safe-area-inset-bottom))] pt-1.5 lg:hidden">
+          <div className="mx-auto grid max-w-md grid-cols-5 items-end rounded-[1.4rem] border border-slate-200/70 bg-white/90 px-1 pb-1.5 pt-1.5 shadow-card backdrop-blur-xl dark:border-navy-800/80 dark:bg-navy-900/90 dark:shadow-card-dark">
+            {PRIMARY_NAV.map(({ href, label, Icon, broad, center }) => {
+              const active = broad(pathname);
+              if (center) {
                 return (
                   <Link
                     key={href}
                     href={href}
-                    onClick={() => {
-                      resetDateToToday();
-                      setMenuOpen(false);
-                    }}
-                    className={`group flex flex-col items-center gap-2 rounded-2xl border px-3 py-4 text-sm font-semibold transition duration-200 ease-spring hover:-translate-y-0.5 active:scale-[0.97] ${
-                      active
-                        ? "border-accent/40 bg-gradient-to-b from-accent/15 to-accent/5 text-accent shadow-glow-accent dark:border-accent-light/40 dark:from-accent-light/20 dark:to-accent-light/5 dark:text-accent-light"
-                        : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:shadow-card dark:border-navy-700 dark:bg-navy-800 dark:text-navy-100 dark:hover:bg-navy-700"
-                    }`}
+                    aria-label={label}
+                    aria-current={active ? "page" : undefined}
+                    className="group relative flex flex-col items-center gap-0.5"
                   >
-                    <Icon className="h-7 w-7 transition-transform duration-200 ease-spring group-hover:scale-110" />
-                    <span>{label}</span>
+                    <span
+                      className={`-mt-6 flex h-[3.4rem] w-[3.4rem] items-center justify-center rounded-full border-4 border-white bg-gradient-to-br from-accent-light to-accent-dark text-white shadow-glow-accent transition duration-200 ease-spring group-active:scale-90 dark:border-navy-900 ${
+                        active ? "scale-105" : ""
+                      }`}
+                    >
+                      <Icon className="h-6 w-6" />
+                    </span>
+                    <span
+                      className={`pb-0.5 text-[10px] font-semibold ${
+                        active
+                          ? "text-accent dark:text-accent-light"
+                          : "text-slate-400 dark:text-navy-300"
+                      }`}
+                    >
+                      {label}
+                    </span>
                   </Link>
                 );
-              })}
-            </div>
-
-            <button
-              type="button"
-              onClick={() => {
-                setMenuOpen(false);
-                void logout();
-              }}
-              className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 py-3 text-sm font-semibold text-slate-600 transition active:scale-[0.98] hover:bg-slate-50 dark:border-navy-700 dark:text-navy-200 dark:hover:bg-navy-800"
-            >
-              ログアウト
-            </button>
+              }
+              return (
+                <Link
+                  key={href}
+                  href={href}
+                  onClick={resetDateToToday}
+                  aria-current={active ? "page" : undefined}
+                  className={`relative flex min-h-[3.25rem] flex-col items-center justify-center gap-0.5 rounded-2xl text-[10px] font-semibold transition duration-200 ease-spring active:scale-90 ${
+                    active
+                      ? "text-accent dark:text-accent-light"
+                      : "text-slate-400 hover:text-slate-600 dark:text-navy-300 dark:hover:text-navy-100"
+                  }`}
+                >
+                  {active && (
+                    <span
+                      aria-hidden
+                      className="absolute inset-x-1.5 inset-y-0.5 -z-10 animate-pop-in rounded-2xl bg-accent/10 dark:bg-accent-light/10"
+                    />
+                  )}
+                  <Icon
+                    className={`h-6 w-6 transition-transform duration-200 ease-spring ${
+                      active ? "scale-110" : ""
+                    }`}
+                  />
+                  <span>{label}</span>
+                </Link>
+              );
+            })}
           </div>
-        </div>
-      )}
+        </nav>
+      </div>
     </div>
   );
 }

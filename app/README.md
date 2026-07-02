@@ -28,7 +28,7 @@
 ## セットアップ & 起動
 
 ```bash
-cd /home/info/health-app
+cd health-coach/app
 npm install
 
 # 開発サーバー（http://localhost:3000）

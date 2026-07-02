@@ -38,9 +38,9 @@ function fakeFetch(
 
 describe("authApi — base URL config", () => {
   it("targets the cross-subdomain API and is the single source of truth", () => {
-    expect(HEALTH_API_BASE).toBe("https://health-api.mogubusi.trade");
+    expect(HEALTH_API_BASE).toBe("");
     expect(googleStartUrl()).toBe(
-      "https://health-api.mogubusi.trade/auth/google/start",
+      "/auth/google/start",
     );
   });
 });
@@ -52,7 +52,7 @@ describe("authApi — cross-subdomain credentials", () => {
       fetchImpl: fakeFetch(202, { ok: true, message: "登録しました。" }, cap),
     });
     expect(res.ok).toBe(true);
-    expect(cap.url).toBe("https://health-api.mogubusi.trade/auth/register");
+    expect(cap.url).toBe("/auth/register");
     expect(cap.init?.method).toBe("POST");
     expect(cap.init?.credentials).toBe("include");
     expect(JSON.parse(String(cap.init?.body))).toEqual({
@@ -109,7 +109,7 @@ describe("authApi — cross-subdomain credentials", () => {
         cap,
       ),
     });
-    expect(cap.url).toBe("https://health-api.mogubusi.trade/auth/me");
+    expect(cap.url).toBe("/auth/me");
     expect(cap.init?.credentials).toBe("include");
     // The csrfToken is re-surfaced by /auth/me (logout-after-reload fix) and split
     // out of the user fields, exactly like login does.
@@ -140,7 +140,7 @@ describe("authApi — CSRF on logout (state-changing)", () => {
   it("sends X-CSRF-Token + credentials:include when a token is present", async () => {
     const cap: { url?: string; init?: RequestInit } = {};
     await logout("csrf-123", { fetchImpl: fakeFetch(200, {}, cap) });
-    expect(cap.url).toBe("https://health-api.mogubusi.trade/auth/logout");
+    expect(cap.url).toBe("/auth/logout");
     expect(cap.init?.method).toBe("POST");
     expect(cap.init?.credentials).toBe("include");
     expect((cap.init?.headers as Record<string, string>)["X-CSRF-Token"]).toBe(
@@ -288,7 +288,7 @@ describe("authApi — calendar status + plan writes", () => {
       "csrf-123",
       { fetchImpl: fakeFetch(409, { error: "calendar_not_connected" }, cap) },
     );
-    expect(cap.url).toBe("https://health-api.mogubusi.trade/api/calendar/plan");
+    expect(cap.url).toBe("/api/calendar/plan");
     expect(cap.init?.method).toBe("POST");
     expect(cap.init?.credentials).toBe("include");
     expect((cap.init?.headers as Record<string, string>)["X-CSRF-Token"]).toBe("csrf-123");

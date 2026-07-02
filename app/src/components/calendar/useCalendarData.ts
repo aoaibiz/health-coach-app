@@ -6,7 +6,8 @@ import { loadWeightLog } from "@/lib/weightLog";
 import { calcTargets } from "@/lib/nutrition";
 import { sumIntake } from "@/lib/intake";
 import { workoutBurn } from "@/lib/burn";
-import { totalVolume, weightedExerciseCount } from "@/lib/workout";
+import { totalVolume, weightedExerciseCount, isDone } from "@/lib/workout";
+import { isMealEaten } from "@/lib/mealStatus";
 import { classifyDayNutrition, type NutrientComparison } from "@/lib/calendar";
 import type {
   Exercise,
@@ -103,10 +104,13 @@ export function useCalendarData(): { data: CalendarData; ready: boolean } {
   }, [weights]);
 
   const markedDays = useMemo(() => {
+    // Only ACTUAL records mark a day — a not-yet-eaten planned meal or a not-done
+    // planned exercise is intent, not history (consistent with every other
+    // aggregation; keeps the calendar from presenting a plan as a logged record).
     const days = new Set<string>();
-    for (const meal of meals) days.add(meal.date);
+    for (const meal of meals) if (isMealEaten(meal)) days.add(meal.date);
     for (const [date, w] of Object.entries(workouts)) {
-      if (onlyNamed(w.exercises).length > 0) days.add(date);
+      if (onlyNamed(w.exercises).filter(isDone).length > 0) days.add(date);
     }
     for (const w of weights) days.add(w.date);
     return days;
@@ -115,9 +119,9 @@ export function useCalendarData(): { data: CalendarData; ready: boolean } {
   const detailFor = useCallback(
     (date: string): DayDetail => {
       const dayMeals = meals
-        .filter((m) => m.date === date)
+        .filter((m) => m.date === date && isMealEaten(m))
         .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-      const exercises = onlyNamed(workouts[date]?.exercises ?? []);
+      const exercises = onlyNamed(workouts[date]?.exercises ?? []).filter(isDone);
       const intake = sumIntake(dayMeals);
       // Burn needs a bodyweight: prefer that day's logged weight, else the
       // profile's. Without either we can't ground a burn → 0 (never invented).

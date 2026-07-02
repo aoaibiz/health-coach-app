@@ -90,15 +90,15 @@ export function WeightTrendChart({ entries, targetKg }: Props) {
         aria-label={ariaLabel}
       >
         <defs>
-          {/* Calm teal gradient for the resting bars. */}
+          {/* Calm brand-green gradient for the resting bars. */}
           <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#2db3a3" />
-            <stop offset="100%" stopColor="#1f9d8f" />
+            <stop offset="0%" stopColor="#3cc484" />
+            <stop offset="100%" stopColor="#17a865" />
           </linearGradient>
           {/* Brighter gradient for the latest/current bar. */}
           <linearGradient id={gradHotId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#3fd0bf" />
-            <stop offset="100%" stopColor="#1f9d8f" />
+            <stop offset="0%" stopColor="#72dba7" />
+            <stop offset="100%" stopColor="#17a865" />
           </linearGradient>
         </defs>
 

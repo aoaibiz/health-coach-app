@@ -11,11 +11,17 @@
 // shows "—"), never a guessed number.
 //
 // PERSISTENCE: a single localStorage key, one document per day (last save wins),
-// exactly like workouts. It is deliberately NOT wired into the cross-device server
-// sync (dataApi DATA_SECTIONS) — that allow-list is server-owned and out of this
-// feature's scope; sleep persists locally like meals/workouts did before sync.
+// exactly like workouts. It IS now wired into the cross-device server sync
+// (dataApi DATA_SECTIONS → syncData SECTION_PLANS), so a sleep record follows the
+// user across devices and a browser clear / device wipe can't silently lose it —
+// the same durable guarantee meals/workouts/weight already have.
 
 import type { SleepLog } from "./types";
+import { clearTombstones } from "./deletionsStore";
+// Best-effort server backup + cross-device delete tombstone (same runtime-only
+// cycle as weightLog.ts / coachSettings.ts: these are CALLED, not evaluated at
+// module load, so the syncData↔sleepLog import cycle is safe).
+import { pushSectionBestEffort, recordDeletion } from "./syncData";
 
 const SLEEP_KEY = "health-app:sleep:v1";
 
@@ -79,10 +85,24 @@ function readStore(): Record<string, SleepLog> {
 
 function writeStore(store: Record<string, SleepLog>): void {
   if (typeof window === "undefined") return;
+  // NO SWALLOW: a failed write (quota / private mode) MUST propagate so the UI/AI
+  // never falsely reports "睡眠を記録しました" for data that did not persist
+  // (phantom-success). Mirrors storage.ts writeJSON (meals/workouts), which also
+  // lets localStorage.setItem throw to the caller.
+  window.localStorage.setItem(SLEEP_KEY, JSON.stringify(store));
+}
+
+/** After a successful local sleep write, supersede any tombstone for the present
+ *  days (so re-logging a deleted day isn't re-suppressed by the merge) and push the
+ *  section to the server immediately. No-op when logged out / suppressed during a
+ *  sync-internal write; never throws (push is best-effort). */
+function afterSleepWrite(dates: string[]): void {
   try {
-    window.localStorage.setItem(SLEEP_KEY, JSON.stringify(store));
+    const revived = clearTombstones("sleep", dates.filter(Boolean));
+    if (revived) pushSectionBestEffort("deletions");
+    pushSectionBestEffort("sleep");
   } catch {
-    // ignore (private mode / quota) — sleep is non-critical local data.
+    /* a failed push leaves local intact; the next flush/login retries it */
   }
 }
 
@@ -95,6 +115,7 @@ export function loadSleepLogs(): Record<string, SleepLog> {
  *  to write a record applySleepLog produced (it builds the next store purely). */
 export function saveSleepLogs(store: Record<string, SleepLog>): void {
   writeStore(store);
+  afterSleepWrite(Object.keys(store));
 }
 
 /** The sleep record for one day, or null when none. */
@@ -124,6 +145,7 @@ export function saveSleepForDate(
   if (durationMin !== null) entry.durationMin = durationMin;
   const next = { ...store, [date]: entry };
   writeStore(next);
+  afterSleepWrite(Object.keys(next));
   return next;
 }
 
@@ -134,6 +156,9 @@ export function deleteSleepForDate(date: string): Record<string, SleepLog> {
   const next = { ...store };
   delete next[date];
   writeStore(next);
+  // Cross-device DELETE → tombstone (id === date), so the day stays deleted on
+  // other devices (the union merge would otherwise re-add it from their copy).
+  recordDeletion("sleep", date);
   return next;
 }
 

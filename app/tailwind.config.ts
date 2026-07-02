@@ -6,38 +6,51 @@ const config: Config = {
   content: ["./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
+      // ── Service colour system (one hue per feature, light + dark) ─────────
+      //   ブランド / コーチ / 食事   = accent fresh-green (below)
+      //   運動（筋トレ）             = violet (power)
+      //   有酸素・消費カロリー       = orange (energy)
+      //   睡眠                     = indigo (rest)
+      //   データ（傾向・カレンダー）  = sky
+      //   PFC                      = rose(P) / amber(F) / sky(C)
+      //   食事タイプ                = 朝 amber / 昼 sky / 夕 indigo / 間食 rose
+      // Tailwind's stock hues are used for those so light/dark contrast stays
+      // guaranteed; only the brand hues (navy/accent) are custom scales.
       colors: {
-        // Navy palette used as the base for the dark theme.
+        // Deep-forest charcoal — the dark theme base. (Kept under the historic
+        // "navy" name so every existing dark: class re-tints app-wide; the hue
+        // family is now a green-tinted near-black that pairs with the brand
+        // green instead of the old blue navy.)
         navy: {
-          50: "#eef1f8",
-          100: "#d6dcef",
-          200: "#aeb9de",
-          300: "#8190c9",
-          400: "#5a6bb0",
-          500: "#3f4f93",
-          600: "#2f3c73",
-          700: "#242e59",
-          800: "#1a2244",
-          900: "#131a36",
-          950: "#0c1126",
+          50: "#eef4f1",
+          100: "#d9e6e0",
+          200: "#b5ccc3",
+          300: "#8cab9f",
+          400: "#63887a",
+          500: "#4a6b5f",
+          600: "#385249",
+          700: "#2b403a",
+          800: "#1e2e29",
+          900: "#15221e",
+          950: "#0d1613",
         },
         accent: {
-          // A calm teal/green accent that reads as "health" in both themes.
-          // Full 50–900 scale (additive) so surfaces can tint/gradient with a
-          // single, consistent hue family instead of ad-hoc opacities.
-          50: "#e8f7f4",
-          100: "#c6ece5",
-          200: "#9adcd0",
-          300: "#62c8b8",
-          400: "#36b2a0",
-          500: "#1f9d8f",
-          600: "#157a6f",
-          700: "#13635b",
-          800: "#134f49",
-          900: "#12423e",
-          DEFAULT: "#1f9d8f",
-          light: "#2db3a3",
-          dark: "#157a6f",
+          // A fresh, vivid green — reads as "health & energy" in both themes.
+          // Full 50–900 scale so surfaces can tint/gradient with a single,
+          // consistent hue family instead of ad-hoc opacities.
+          50: "#eefbf3",
+          100: "#d4f5e2",
+          200: "#a8ebc8",
+          300: "#72dba7",
+          400: "#3cc484",
+          500: "#17a865",
+          600: "#0e8752",
+          700: "#0d6b43",
+          800: "#0e5537",
+          900: "#0c462f",
+          DEFAULT: "#17a865",
+          light: "#3cc484",
+          dark: "#0e8752",
         },
       },
       fontFamily: {
@@ -94,7 +107,11 @@ const config: Config = {
         "card-dark": "0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 24px -6px rgba(0, 0, 0, 0.4), 0 20px 48px -16px rgba(0, 0, 0, 0.5)",
         "card-hover": "0 2px 4px rgba(16, 24, 40, 0.05), 0 12px 28px -6px rgba(16, 24, 40, 0.10), 0 28px 56px -16px rgba(16, 24, 40, 0.12)",
         "card-hover-dark": "0 2px 6px rgba(0, 0, 0, 0.4), 0 16px 36px -8px rgba(0, 0, 0, 0.5), 0 32px 64px -20px rgba(0, 0, 0, 0.6)",
-        "glow-accent": "0 8px 24px -6px rgba(31, 157, 143, 0.45)",
+        "glow-accent": "0 8px 24px -6px rgba(23, 168, 101, 0.45)",
+        // Service-colour glows (see the service palette note above `colors`).
+        "glow-energy": "0 8px 24px -6px rgba(249, 115, 22, 0.4)",
+        "glow-rest": "0 8px 24px -6px rgba(129, 140, 248, 0.35)",
+        "glow-power": "0 8px 24px -6px rgba(139, 92, 246, 0.35)",
         "inner-top": "inset 0 1px 0 0 rgba(255, 255, 255, 0.06)",
       },
     },

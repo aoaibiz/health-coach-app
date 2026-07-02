@@ -4,12 +4,13 @@ import { useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { DateSwitcher } from "@/components/DateSwitcher";
 import { useSelectedDate } from "@/components/SelectedDateProvider";
+import Link from "next/link";
 import { ExerciseCard } from "@/components/workout/ExerciseCard";
 import { ExerciseEditor } from "@/components/workout/ExerciseEditor";
 import { SummaryPanel } from "@/components/workout/SummaryPanel";
 import { useWorkout } from "@/components/workout/useWorkout";
 import { useProfile } from "@/components/profile/useProfile";
-import { DumbbellIcon, PlusIcon } from "@/components/icons";
+import { ChevronRightIcon, DumbbellIcon, FlameIcon, PlusIcon } from "@/components/icons";
 import type { Exercise } from "@/lib/types";
 
 export default function WorkoutPage() {
@@ -37,7 +38,38 @@ export default function WorkoutPage() {
   return (
     <AppShell>
       <div className="space-y-4">
+        {/* Page identity — 運動 = power violet (service colour). */}
+        <header className="flex items-center gap-3">
+          <span className="icon-chip bg-violet-100 text-violet-600 dark:bg-violet-400/15 dark:text-violet-300">
+            <DumbbellIcon className="h-5 w-5" />
+          </span>
+          <div className="min-w-0">
+            <h1 className="text-lg font-bold tracking-tight">運動</h1>
+            <p className="text-xs text-slate-500 dark:text-navy-300">
+              筋トレの記録と、GPSでの有酸素計測
+            </p>
+          </div>
+        </header>
+
         <DateSwitcher date={date} onChange={setDate} />
+
+        {/* 有酸素はここから — the GPS tracker keeps its own screen (/cardio);
+            this energetic launcher folds it under 運動 so nothing is hidden. */}
+        <Link
+          href="/cardio"
+          className="group flex items-center gap-3.5 overflow-hidden rounded-2xl bg-gradient-to-r from-orange-400 to-orange-500 p-4 text-white shadow-glow-energy transition duration-200 ease-spring hover:-translate-y-0.5 hover:shadow-card-hover active:translate-y-0 active:scale-[0.99]"
+        >
+          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white/20 backdrop-blur-sm">
+            <FlameIcon className="h-6 w-6" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-bold">有酸素をGPSで計測</span>
+            <span className="block text-xs text-white/85">
+              歩き・ラン・自転車 — 距離と消費カロリーを自動記録
+            </span>
+          </span>
+          <ChevronRightIcon className="h-5 w-5 shrink-0 transition-transform duration-200 ease-spring group-hover:translate-x-0.5" />
+        </Link>
 
         <SummaryPanel exercises={exercises} prevWorkout={prevWorkout} profile={profile} />
 
@@ -84,9 +116,11 @@ export default function WorkoutPage() {
 
 function EmptyState() {
   return (
-    <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 py-12 text-center dark:border-navy-800">
-      <DumbbellIcon className="mb-3 h-10 w-10 text-slate-300 dark:text-navy-600" />
-      <p className="text-sm font-medium text-slate-500 dark:text-navy-300">
+    <div className="flex animate-fade-in-up flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 py-12 text-center dark:border-navy-800">
+      <span className="mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-accent/10 text-accent dark:bg-accent-light/15 dark:text-accent-light">
+        <DumbbellIcon className="h-7 w-7" />
+      </span>
+      <p className="text-sm font-semibold text-slate-600 dark:text-navy-200">
         今日のトレーニングを記録
       </p>
       <p className="mt-1 text-xs text-slate-400 dark:text-navy-400">

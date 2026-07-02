@@ -18,13 +18,8 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const { state } = useAuth();
   const view = gateView(state.status);
 
-  // TEMP BYPASS (2026-06-19・コルヴス): 認証バックエンド(#50 配線)が未完了のまま「ログイン必須」ゲートが
-  // 本番に出て、アオさん家族がアプリに入れなくなった事故の復旧。ゲートを一旦無効化し、従来どおり
-  // (per-device localStorage)アプリを開けるようにする。#50(auth backend配線+動作確認)完了後に
-  // GATE_DISABLED=false へ戻してゲートを復活させること。
-  const GATE_DISABLED = false;
-  if (!GATE_DISABLED && view === "splash") return <Splash />;
-  if (!GATE_DISABLED && view === "auth") return <AuthScreen />;
+  if (view === "splash") return <Splash />;
+  if (view === "auth") return <AuthScreen />;
   return <>{children}</>;
 }
 

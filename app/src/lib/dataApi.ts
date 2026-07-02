@@ -19,6 +19,10 @@ export type DataSection =
   | "profile"
   | "meals"
   | "workouts"
+  // Sleep (就寝/起床 per day). Synced so a sleep record follows the user across
+  // devices and a browser clear / device wipe can't silently lose it (it was
+  // previously local-only — Codex audit C1).
+  | "sleep"
   | "weightLog"
   | "coachSettings"
   | "chat"
@@ -36,10 +40,10 @@ export const DATA_SECTIONS: readonly DataSection[] = [
   "profile",
   "meals",
   "workouts",
+  "sleep",
   "weightLog",
   "coachSettings",
   "chat",
-  "apiToken",
   "deletions",
 ];
 

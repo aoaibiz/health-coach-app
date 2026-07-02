@@ -88,6 +88,38 @@ describe("compressGeneratedMealImageToDataUrl", () => {
 
     expect(url).toBeNull();
   });
+
+  it("falls back to a smaller canvas when the first generated meal icon is too large", async () => {
+    const big =
+      "data:image/webp;base64," + "B".repeat(MEAL_GENERATED_IMAGE_MAX_DATA_URL_CHARS + 1);
+    const small = "data:image/webp;base64,SMALL";
+    const calls: Array<{ type?: string; quality?: number; width: number; height: number }> = [];
+    let canvasRef: CanvasStub | null = null;
+    const { canvas } = installCanvas({
+      bitmap: { width: 1024, height: 768 },
+      toDataURL: (type, quality) => {
+        calls.push({
+          type,
+          quality,
+          width: canvasRef?.width ?? 0,
+          height: canvasRef?.height ?? 0,
+        });
+        return calls.length <= 5 ? big : small;
+      },
+    });
+    canvasRef = canvas;
+
+    const url = await compressGeneratedMealImageToDataUrl(new Blob(["png"], { type: "image/png" }));
+
+    expect(url).toBe(small);
+    expect(calls.slice(0, 5).every((call) => call.width === 192 && call.height === 192)).toBe(true);
+    expect(calls[5]).toMatchObject({
+      type: "image/webp",
+      quality: 0.82,
+      width: 160,
+      height: 160,
+    });
+  });
 });
 
 describe("isValidGeneratedMealImageDataUrl", () => {

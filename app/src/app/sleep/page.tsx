@@ -21,6 +21,7 @@ export default function SleepPage() {
   const [bedtime, setBedtime] = useState("");
   const [wakeTime, setWakeTime] = useState("");
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState(false);
 
   // Adopt the saved record for the selected day into the inputs whenever the day
   // (or its stored record) changes — so switching days shows that day's values.
@@ -28,6 +29,7 @@ export default function SleepPage() {
     setBedtime(sleep?.bedtime ?? "");
     setWakeTime(sleep?.wakeTime ?? "");
     setSaved(false);
+    setSaveError(false);
   }, [date, sleep?.bedtime, sleep?.wakeTime]);
 
   // Live preview of the duration as the user types (recomputed, never stored raw).
@@ -39,8 +41,11 @@ export default function SleepPage() {
 
   function handleSave() {
     if (!canSave) return;
-    save(bedtime, wakeTime);
-    setSaved(true);
+    // Only claim success when the write actually PERSISTED (Codex audit C1): a
+    // localStorage failure shows a real error, never a phantom "記録しました".
+    const ok = save(bedtime, wakeTime);
+    setSaved(ok);
+    setSaveError(!ok);
   }
 
   function handleClear() {
@@ -48,18 +53,34 @@ export default function SleepPage() {
     setBedtime("");
     setWakeTime("");
     setSaved(false);
+    setSaveError(false);
   }
 
   return (
     <AppShell>
       <div className="space-y-4">
+        {/* Page identity — 睡眠 = rest indigo (service colour). */}
+        <header className="flex items-center gap-3">
+          <span className="icon-chip bg-indigo-100 text-indigo-500 dark:bg-indigo-400/15 dark:text-indigo-300">
+            <MoonIcon className="h-5 w-5" />
+          </span>
+          <div className="min-w-0">
+            <h1 className="text-lg font-bold tracking-tight">睡眠</h1>
+            <p className="text-xs text-slate-500 dark:text-navy-300">
+              寝た時間と起きた時間から自動計算します
+            </p>
+          </div>
+        </header>
+
         <DateSwitcher date={date} onChange={setDate} />
 
-        <section className="surface p-5">
-          <h1 className="mb-1 flex items-center gap-2 text-lg font-bold">
-            <MoonIcon className="h-5 w-5 text-indigo-400" /> 睡眠
-          </h1>
-          <p className="mb-4 text-xs leading-relaxed text-slate-500 dark:text-navy-300">
+        <section className="surface relative overflow-hidden p-5">
+          {/* faint moonlit glow */}
+          <div
+            aria-hidden
+            className="pointer-events-none absolute -right-16 -top-16 h-40 w-40 rounded-full bg-indigo-400/10 blur-3xl"
+          />
+          <p className="relative mb-4 text-xs leading-relaxed text-slate-500 dark:text-navy-300">
             その日の<strong>寝た時間</strong>と<strong>起きた時間</strong>を入れると、睡眠時間を自動で計算します（日付をまたいでもOK・例: 23:00就寝→7:00起床＝8時間）。
           </p>
 
@@ -70,6 +91,7 @@ export default function SleepPage() {
               onChange={(v) => {
                 setBedtime(v);
                 setSaved(false);
+                setSaveError(false);
               }}
             />
             <TimeField
@@ -78,14 +100,17 @@ export default function SleepPage() {
               onChange={(v) => {
                 setWakeTime(v);
                 setSaved(false);
+                setSaveError(false);
               }}
             />
           </div>
 
           {/* Derived duration — the headline number. "—" when incomplete. */}
-          <div className="mt-4 rounded-xl bg-slate-50 px-4 py-3 text-center dark:bg-navy-800/60">
-            <p className="text-[11px] text-slate-400 dark:text-navy-400">睡眠時間（自動計算）</p>
-            <p className="mt-0.5 text-2xl font-bold tabular-nums text-slate-800 dark:text-navy-50">
+          <div className="mt-4 rounded-xl bg-gradient-to-br from-indigo-50 to-slate-50 px-4 py-3.5 text-center dark:from-indigo-400/10 dark:to-navy-800/60">
+            <p className="text-[11px] font-medium text-indigo-400/90 dark:text-indigo-300/80">
+              睡眠時間（自動計算）
+            </p>
+            <p className="mt-0.5 text-3xl font-bold tabular-nums tracking-tight text-slate-800 dark:text-navy-50">
               {previewMin != null ? (
                 formatDuration(previewMin)
               ) : (
@@ -104,8 +129,14 @@ export default function SleepPage() {
           </button>
 
           {saved && (
-            <p className="mt-2 text-center text-sm font-semibold text-emerald-600 dark:text-emerald-400">
+            <p className="mt-2 animate-pop-in rounded-xl bg-emerald-50 px-3 py-2 text-center text-sm font-semibold text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-300">
               ✓ 睡眠を記録しました
+            </p>
+          )}
+
+          {saveError && (
+            <p className="mt-2 animate-fade-in rounded-xl bg-rose-50 px-3 py-2 text-center text-sm font-semibold text-rose-600 dark:bg-rose-400/10 dark:text-rose-300">
+              保存に失敗しました。端末の空き容量を確認して、もう一度お試しください。
             </p>
           )}
 

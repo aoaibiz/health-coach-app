@@ -5,7 +5,7 @@ import { loadMeals, loadProfile, loadWorkouts } from "@/lib/storage";
 import { calcTargets } from "@/lib/nutrition";
 import { sumIntake } from "@/lib/intake";
 import { workoutBurn } from "@/lib/burn";
-import { totalVolume, totalReps, weightedExerciseCount } from "@/lib/workout";
+import { totalVolume, totalReps, weightedExerciseCount, exerciseCount } from "@/lib/workout";
 import { isMealEaten } from "@/lib/mealStatus";
 import type { Meal, NutritionTargets, Profile, Workout } from "@/lib/types";
 import { DATA_CHANGED_EVENT } from "@/lib/syncData";
@@ -90,7 +90,9 @@ export function useDailyData(date: string): { data: DailyData; ready: boolean } 
       volume: totalVolume(exercises),
       totalReps: totalReps(exercises),
       hasWeighted: weightedExerciseCount(exercises) > 0,
-      exerciseCount: exercises.filter((e) => e.name.trim() !== "").length,
+      // DONE-only (mirrors burnKcal/volume): a not-yet-done PLAN must not show as
+      // "1種目" next to "0 kcal" on the today snapshot.
+      exerciseCount: exerciseCount(exercises),
       // Discoverability count = EATEN meals (a not-yet-eaten plan isn't a logged
       // meal yet — it shouldn't suppress the "食事タブから記録" nudge / hero hint).
       mealCount: eatenMeals.length,

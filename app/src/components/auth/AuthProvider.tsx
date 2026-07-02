@@ -190,9 +190,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       pushSectionBestEffort("weightLog");
       pushSectionBestEffort("coachSettings");
       pushSectionBestEffort("chat");
-      // The access key is written by the settings form (also not covered by
-      // storage.ts's per-save push), so back it up here too.
-      pushSectionBestEffort("apiToken");
+      // Sleep (就寝/起床) is written by the page/chat per save, but flush it here too
+      // so a long single-session of edits is backed up even without a tab-hide.
+      pushSectionBestEffort("sleep");
+      // NOTE: the shared access key (apiToken) is intentionally NOT synced anymore
+      // (Codex audit S1/S7) — it must never be persisted to the server (D1).
       // Delete tombstones (incl. any `cleared` revive op) — back them up here too
       // so a delete/re-add isn't left only on this device if a per-save push was
       // missed (e.g. tab closed before the deletions push landed).

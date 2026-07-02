@@ -13,6 +13,7 @@ import { CalendarSettingsCard } from "@/components/settings/CalendarSettingsCard
 import { DataBackupCard } from "@/components/settings/DataBackupCard";
 import { AccountCard } from "@/components/settings/AccountCard";
 import { initialProfileMode, type ProfileScreenMode } from "@/lib/profileView";
+import { UserIcon } from "@/components/icons";
 
 export default function ProfilePage() {
   const { profile, targets, ready, save } = useProfile();
@@ -31,12 +32,18 @@ export default function ProfilePage() {
 
   return (
     <AppShell>
-      <div className="space-y-4">
-        <header>
-          <h1 className="text-xl font-bold tracking-tight">プロフィール</h1>
-          <p className="mt-1 text-sm text-slate-500 dark:text-navy-300">
-            身体情報から1日の目標カロリーと PFC を計算します。
-          </p>
+      <div className="stagger space-y-4 pb-4">
+        {/* Page identity — プロフィール/設定 = neutral slate. */}
+        <header className="flex items-center gap-3">
+          <span className="icon-chip bg-slate-200/80 text-slate-600 dark:bg-navy-800 dark:text-navy-200">
+            <UserIcon className="h-5 w-5" />
+          </span>
+          <div className="min-w-0">
+            <h1 className="text-lg font-bold tracking-tight">プロフィール・設定</h1>
+            <p className="text-xs text-slate-500 dark:text-navy-300">
+              身体情報から1日の目標カロリーと PFC を計算します
+            </p>
+          </div>
         </header>
 
         {/* ログイン中のアカウント（メールアドレス）を常に明示 — どのアカウントで

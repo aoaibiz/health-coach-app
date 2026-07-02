@@ -8,7 +8,13 @@ import { MockChatProvider } from "../dist/functions/_llm/chat-mock.js";
 const TEST_TOKEN = "test-health-token";
 
 function startServer(options = {}) {
-  const server = createAppServer(undefined, { token: TEST_TOKEN, ...options });
+  // Default to an AUTHENTICATED session (Codex audit S1: /api/chat now requires a
+  // real ha_session, not a token); auth-specific tests override verifySession.
+  const server = createAppServer(undefined, {
+    token: TEST_TOKEN,
+    verifySession: () => true,
+    ...options,
+  });
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
       const { port } = server.address();
@@ -83,14 +89,18 @@ describe("Node server — POST /api/chat route wiring", () => {
 });
 
 describe("Node server — /api/chat auth + honest errors", () => {
-  it("missing/incorrect token → 401 before processing", async () => {
-    const srv = await startServer({ makeChatProvider: () => new MockChatProvider() });
+  it("no valid login session → 401 before processing (Codex audit S1)", async () => {
+    // A token alone must NOT grant access; the route requires a verified ha_session.
+    const srv = await startServer({
+      verifySession: () => false,
+      makeChatProvider: () => new MockChatProvider(),
+    });
     try {
       const res = await postChat(
         srv.base,
         { messages: [{ role: "user", content: "hi" }] },
         undefined,
-        "",
+        TEST_TOKEN,
       );
       expect(res.status).toBe(401);
       const data = await res.json();

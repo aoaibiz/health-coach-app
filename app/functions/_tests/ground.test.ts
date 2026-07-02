@@ -37,6 +37,7 @@ describe("findFood — DB lookup + disambiguation", () => {
     expect(findFood("食パン")?.food_code).toBe("01026");
     expect(findFood("卵")?.food_code).toBe("12004");
     expect(findFood("鶏むね肉")?.food_code).toBe("11288");
+    expect(findFood("鶏むね肉 皮なし")?.food_code).toBe("11288");
     expect(findFood("鶏肉")?.food_code).toBe("11221");
     expect(findFood("玉ねぎ")?.food_code).toBe("06153");
     expect(findFood("うどん")?.food_code).toBe("01039");

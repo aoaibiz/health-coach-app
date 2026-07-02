@@ -56,6 +56,7 @@ import {
   sanitizeCoachSettings,
   type CoachSettings,
 } from "./coachSettings";
+import { loadSleepLogs, saveSleepLogs } from "./sleepLog";
 // chatStore is owned by another agent — we only READ/merge through its public
 // load/save/sanitize helpers, never modify the module.
 import {
@@ -64,9 +65,10 @@ import {
   sanitizeHistory,
   type ChatMessage,
 } from "./chatStore";
+// apiToken is NO LONGER a synced section (Codex audit S1/S7: the shared access key
+// must not be persisted to D1). We keep mergeApiToken below (still exercised by the
+// unit tests + the pure-merge contract) so only sanitize/type are imported here.
 import {
-  loadApiTokenData,
-  saveApiTokenData,
   sanitizeApiTokenData,
   type ApiTokenData,
 } from "./apiTokenStore";
@@ -80,7 +82,7 @@ import {
   addTombstone,
   type DeletionsMap,
 } from "./deletionsStore";
-import type { Meal, Profile, Workout } from "./types";
+import type { Meal, Profile, SleepLog, Workout } from "./types";
 
 // ─── Pure merge primitives ──────────────────────────────────────────────────
 //
@@ -337,6 +339,48 @@ export function mergeWeightLog(local: WeightEntry[], server: unknown): WeightEnt
   return sanitizeEntries([...s, ...local]);
 }
 
+/** A well-formed sleep record (date + the two times + an ISO updatedAt). */
+function isSleepLog(v: unknown): v is SleepLog {
+  if (!v || typeof v !== "object") return false;
+  const s = v as Record<string, unknown>;
+  return (
+    typeof s.date === "string" &&
+    typeof s.bedtime === "string" &&
+    typeof s.wakeTime === "string"
+  );
+}
+
+/** Coerce a raw value into a clean date→SleepLog map (drops malformed rows). Pure. */
+function sanitizeSleepMap(raw: unknown): Record<string, SleepLog> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, SleepLog> = {};
+  for (const [date, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (isSleepLog(v)) out[date] = { ...(v as SleepLog), date };
+  }
+  return out;
+}
+
+/**
+ * Merge the sleep store (one document per date). Union of date keys — no day's
+ * sleep is ever dropped. On a same-date collision the record with the later
+ * `updatedAt` wins (LWW), tie-breaking to LOCAL (the active device), mirroring the
+ * per-day model meals/workouts use. An empty/missing server map can't clear local.
+ */
+export function mergeSleep(
+  local: Record<string, SleepLog>,
+  server: unknown,
+): Record<string, SleepLog> {
+  const s = sanitizeSleepMap(server);
+  const l = sanitizeSleepMap(local);
+  const out: Record<string, SleepLog> = { ...s };
+  for (const [date, lw] of Object.entries(l)) {
+    const sw = out[date];
+    // local wins ties (>=) so the active device's edit is preferred.
+    out[date] = !sw || (lw.updatedAt ?? "") >= (sw.updatedAt ?? "") ? lw : sw;
+  }
+  return out;
+}
+
 /**
  * Merge the profile (a single object with an ISO `updatedAt`). The NEWER profile
  * wins for ALL fields, with ONE narrow exception: the AVATAR (avatarDataUrl /
@@ -465,6 +509,17 @@ export function applyTombstonesToSection(
       const d = (it as { date?: unknown })?.date;
       return !(typeof d === "string" && dead.has(d));
     });
+  }
+  if (section === "sleep") {
+    // sleep is a date→SleepLog MAP; the tombstone id IS the date. Drop tombstoned
+    // dates so a cross-device delete STICKS (the union would otherwise re-add a
+    // day deleted on another device from that device's copy).
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const out: Record<string, unknown> = {};
+    for (const [date, day] of Object.entries(value as Record<string, unknown>)) {
+      if (!dead.has(date)) out[date] = day;
+    }
+    return out;
   }
   if (section === "workouts") {
     // Exercise-level tombstones: id = exercise id. Drop tombstoned exercises from
@@ -605,6 +660,12 @@ const SECTION_PLANS: SectionPlan<unknown>[] = [
     writeLocal: (m) => saveWorkouts(m as Record<string, Workout>),
   },
   {
+    section: "sleep",
+    readLocal: () => loadSleepLogs(),
+    merge: (l, s) => mergeSleep(l as Record<string, SleepLog>, s),
+    writeLocal: (m) => saveSleepLogs(m as Record<string, SleepLog>),
+  },
+  {
     section: "weightLog",
     readLocal: () => loadWeightLog(),
     merge: (l, s) => mergeWeightLog(l as WeightEntry[], s),
@@ -622,12 +683,9 @@ const SECTION_PLANS: SectionPlan<unknown>[] = [
     merge: (l, s) => mergeChat(l as ChatMessage[], s),
     writeLocal: (m) => saveChat(m as ChatMessage[]),
   },
-  {
-    section: "apiToken",
-    readLocal: () => loadApiTokenData(),
-    merge: (l, s) => mergeApiToken(l as ApiTokenData, s),
-    writeLocal: (m) => saveApiTokenData(m as ApiTokenData),
-  },
+  // NOTE: `apiToken` is intentionally NOT synced (Codex audit S1/S7) — the shared
+  // access key must never be persisted to the server (D1). The server allow-list
+  // also rejects it, so even a stray push can't store it.
 ];
 
 /** Most server PUTs accept an object or array — but coachSettings/profile can be
@@ -670,6 +728,11 @@ export interface SyncDeps {
 function sectionItemCount(section: DataSection, value: unknown): number {
   if (section === "meals") return Array.isArray(value) ? value.length : 0;
   if (section === "workouts") {
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? Object.keys(value as Record<string, unknown>).length
+      : 0;
+  }
+  if (section === "sleep") {
     return value && typeof value === "object" && !Array.isArray(value)
       ? Object.keys(value as Record<string, unknown>).length
       : 0;

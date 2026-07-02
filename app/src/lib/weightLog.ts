@@ -351,24 +351,24 @@ export function loadWeightLog(): WeightEntry[] {
 
 export function saveWeightLog(entries: WeightEntry[]): void {
   if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(
-      WEIGHT_LOG_STORAGE_KEY,
-      JSON.stringify(entries.slice(-MAX_STORED)),
-    );
-  } catch {
-    /* quota/serialization errors are non-fatal */
-  }
+  // NO SWALLOW: a failed write (quota / private mode) MUST propagate so a
+  // user-confirmed save never shows "保存 ✓" for data that did not persist
+  // (phantom-success — Codex audit C2). Mirrors storage.ts writeJSON.
+  window.localStorage.setItem(
+    WEIGHT_LOG_STORAGE_KEY,
+    JSON.stringify(entries.slice(-MAX_STORED)),
+  );
   // A re-logged date supersedes any old tombstone for that date (weightLog ids are
   // the reused date), so re-entering a deleted day isn't re-suppressed by the
-  // merge. When a tombstone was actually revived, push BOTH the cleared op and the
-  // weightLog so another device doesn't keep the old `deleted` op and re-suppress
-  // the re-logged day (Codex review). No-op for a sync write of the excluded union.
+  // merge. When a tombstone was actually revived, push the cleared op too so
+  // another device doesn't keep the old `deleted` op and re-suppress the re-logged
+  // day (Codex review). No-op for a sync write of the excluded union.
   const revived = clearTombstones("weightLog", entries.map((e) => e.date).filter(Boolean));
-  if (revived) {
-    pushSectionBestEffort("deletions");
-    pushSectionBestEffort("weightLog");
-  }
+  if (revived) pushSectionBestEffort("deletions");
+  // Sync EVERY successful save immediately (Codex audit C2: a normal weight entry
+  // must reach the server now, not only on the later visibility/pagehide flush or a
+  // tombstone revival). No-op when logged out / suppressed during a sync write.
+  pushSectionBestEffort("weightLog");
 }
 
 /**

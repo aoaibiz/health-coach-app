@@ -41,6 +41,10 @@ describe("standard-portions table — the shared source of truth", () => {
     expect(standardPortionGrams("卵")).toBe(50);
     expect(standardPortionGrams("味噌汁")).toBe(200);
     expect(standardPortionGrams("プロテイン")).toBe(30);
+    expect(standardPortionGrams("鶏むね肉 皮なし")).toBe(100);
+    expect(standardPortionGrams("豚バラ")).toBe(80);
+    expect(standardPortionGrams("さつまいも")).toBe(150);
+    expect(standardPortionGrams("ハイボール")).toBe(350);
     // Not a named staple → no specific standard portion.
     expect(standardPortionGrams("謎の料理")).toBeNull();
   });
@@ -87,7 +91,7 @@ describe("coach path === AI-analysis path (Ao's bug: 8 vs 10 must become the SAM
   });
 
   it("the staples agree on both paths for an unstated amount", () => {
-    for (const name of ["ごはん", "食パン", "卵", "バナナ", "納豆"]) {
+    for (const name of ["ごはん", "食パン", "卵", "バナナ", "納豆", "鶏むね肉", "さつまいも"]) {
       const coach = coachGround(name, 0);
       const ai = aiGround(name, 0);
       expect(coach.grams, `${name} grams`).toBe(ai.grams);

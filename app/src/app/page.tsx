@@ -1,14 +1,10 @@
 "use client";
 
-import { AppShell } from "@/components/AppShell";
-import { ChatView } from "@/components/chat/ChatView";
+import { TodayView } from "@/components/today/TodayView";
 
-// Home (/) is the CHAT — after login the coach conversation is the landing.
-// The other pages (成果/食事/筋トレ/カレンダー) are reachable from the nav menu.
+// Home (/) is 今日 — the today-at-a-glance dashboard: calorie hero, next action,
+// quick-log tiles, streak, PFC balance, weight. The coach lives at /chat
+// (the raised centre tab); every feature is one tap from the bottom bar.
 export default function HomePage() {
-  return (
-    <AppShell>
-      <ChatView />
-    </AppShell>
-  );
+  return <TodayView />;
 }

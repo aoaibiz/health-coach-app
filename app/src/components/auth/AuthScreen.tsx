@@ -176,7 +176,7 @@ export function AuthScreen() {
             </p>
           )}
 
-          <button type="submit" disabled={busy} className="btn-primary w-full py-2.5">
+          <button type="submit" disabled={busy} className="btn-primary w-full py-3">
             {busy ? "処理中…" : isRegister ? "会員登録する" : "ログイン"}
           </button>
         </form>
@@ -191,7 +191,7 @@ export function AuthScreen() {
         <button
           type="button"
           onClick={handleGoogle}
-          className="flex w-full items-center justify-center gap-2.5 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition active:scale-[0.98] hover:bg-slate-50 dark:border-navy-700 dark:bg-navy-800 dark:text-navy-50 dark:hover:bg-navy-700"
+          className="flex w-full items-center justify-center gap-2.5 rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition active:scale-[0.98] hover:bg-slate-50 dark:border-navy-700 dark:bg-navy-800 dark:text-navy-50 dark:hover:bg-navy-700"
         >
           <GoogleMark />
           Googleでログイン

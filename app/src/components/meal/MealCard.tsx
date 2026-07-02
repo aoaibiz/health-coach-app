@@ -290,12 +290,26 @@ export function MealCard({
 }
 
 function GeneratedMealImagePlaceholder({ generating }: { generating?: boolean }) {
+  if (generating) {
+    // Live "生成中" tile: shimmer skeleton + label, so the async image job reads
+    // as active work instead of a dead gray box.
+    return (
+      <div
+        className="skeleton flex h-16 w-16 shrink-0 items-center justify-center sm:h-20 sm:w-20"
+        aria-label="画像生成中"
+      >
+        <span className="relative z-10 animate-pulse text-[10px] font-semibold text-slate-400 dark:text-navy-300">
+          生成中…
+        </span>
+      </div>
+    );
+  }
   return (
     <div
-      className="flex h-16 w-16 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-[10px] font-semibold text-slate-400 sm:h-20 sm:w-20 dark:bg-navy-800 dark:text-navy-400"
-      aria-label={generating ? "画像生成中" : "画像未生成"}
+      className="flex h-16 w-16 shrink-0 items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 text-[10px] font-medium text-slate-400 sm:h-20 sm:w-20 dark:border-navy-700 dark:bg-navy-800/60 dark:text-navy-400"
+      aria-label="画像未生成"
     >
-      {generating ? "生成中" : "画像"}
+      画像
     </div>
   );
 }

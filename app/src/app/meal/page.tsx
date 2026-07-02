@@ -203,6 +203,19 @@ export default function MealPage() {
   return (
     <AppShell>
       <div className="space-y-4 pb-24">
+        {/* Page identity — 食事 = brand green (service colour). */}
+        <header className="flex items-center gap-3">
+          <span className="icon-chip bg-accent-100 text-accent-700 dark:bg-accent-light/15 dark:text-accent-light">
+            <MealIcon className="h-5 w-5" />
+          </span>
+          <div className="min-w-0">
+            <h1 className="text-lg font-bold tracking-tight">食事</h1>
+            <p className="text-xs text-slate-500 dark:text-navy-300">
+              ＋から写真かテキストで記録 → ✨AI解析でカロリーとPFC
+            </p>
+          </div>
+        </header>
+
         <DateSwitcher date={date} onChange={setDate} />
 
         {profileReady && !profile && (
@@ -284,9 +297,11 @@ export default function MealPage() {
 
 function EmptyState() {
   return (
-    <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 px-6 py-16 text-center dark:border-navy-800">
-      <MealIcon className="mb-3 h-10 w-10 text-slate-300 dark:text-navy-600" />
-      <p className="text-sm font-medium text-slate-500 dark:text-navy-300">
+    <div className="flex animate-fade-in-up flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 px-6 py-16 text-center dark:border-navy-800">
+      <span className="mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-accent/10 text-accent dark:bg-accent-light/15 dark:text-accent-light">
+        <MealIcon className="h-7 w-7" />
+      </span>
+      <p className="text-sm font-semibold text-slate-600 dark:text-navy-200">
         まだ記録がありません
       </p>
       <p className="mt-1 text-xs text-slate-400 dark:text-navy-400">

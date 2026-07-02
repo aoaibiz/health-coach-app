@@ -23,7 +23,9 @@ import { PencilIcon, TrashIcon, UserIcon } from "@/components/icons";
 
 interface Props {
   existing: CoachSettings;
-  onSave: (settings: CoachSettings) => void;
+  /** Persist the settings; returns whether the local write PERSISTED. The form
+   *  only transitions to the saved view on `true` (Codex audit C3). */
+  onSave: (settings: CoachSettings) => boolean;
 }
 
 /**
@@ -276,6 +278,9 @@ function CoachSettingsEditForm({ existing, onSave, onSaved }: EditProps) {
   const [avatarCleared, setAvatarCleared] = useState(false);
   const [customUrl, setCustomUrl] = useState<string | null>(null);
   const [avatarBusy, setAvatarBusy] = useState(false);
+  // True when the last save did NOT persist (localStorage quota / private mode):
+  // we stay in the edit form and show a real error instead of the saved view.
+  const [saveError, setSaveError] = useState(false);
   const avatarFileRef = useRef<HTMLInputElement>(null);
 
   // Load a preview: prefer the synced data URL; fall back to the legacy blob
@@ -368,10 +373,18 @@ function CoachSettingsEditForm({ existing, onSave, onSaved }: EditProps) {
       // A custom photo (data URL or a preserved legacy blob) overrides any preset.
       presetAvatar: hasCustom || (!avatarChanged && legacyPhotoId) ? undefined : presetAvatar,
     };
-    onSave(settings);
-    // Return to the saved/confirmation view (Fix 2) — the parent re-reads the
-    // now-persisted settings, so the view reflects exactly what was saved.
-    onSaved?.();
+    // Only transition to the saved/confirmation view when the local write actually
+    // PERSISTED (Codex audit C3). On failure, STAY in the edit form and show a real
+    // error — never a phantom "設定済み" view for settings that didn't save.
+    const ok = onSave(settings);
+    if (ok) {
+      setSaveError(false);
+      // The parent re-reads the now-persisted settings, so the view reflects
+      // exactly what was saved (Fix 2).
+      onSaved?.();
+    } else {
+      setSaveError(true);
+    }
   }
 
   // The avatar shown in the live preview (custom > preset > default mascot).
@@ -502,6 +515,12 @@ function CoachSettingsEditForm({ existing, onSave, onSaved }: EditProps) {
           コーチの設定を保存
         </button>
       </div>
+
+      {saveError && (
+        <p className="text-center text-sm font-semibold text-rose-600 dark:text-rose-400">
+          保存に失敗しました。端末の空き容量を確認して、もう一度お試しください。
+        </p>
+      )}
     </div>
   );
 }

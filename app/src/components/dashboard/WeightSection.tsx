@@ -35,6 +35,7 @@ export function WeightSection({ targetWeightKg }: Props) {
   const [entries, setEntries] = useState<WeightEntry[]>([]);
   const [input, setInput] = useState("");
   const [justSaved, setJustSaved] = useState(false);
+  const [saveError, setSaveError] = useState(false);
 
   // Load the weight log, and re-read it whenever the user returns to this tab
   // (focus) or another tab edits localStorage (storage). This is the "全ページ連動"
@@ -76,10 +77,18 @@ export function WeightSection({ targetWeightKg }: Props) {
 
   function handleSave() {
     if (!valid) return;
-    const next = logWeight(parsed); // upsert today's entry → persist
-    setEntries(next);
-    setJustSaved(true);
-    window.setTimeout(() => setJustSaved(false), 1600);
+    // Only show "保存 ✓" when the write actually PERSISTED (Codex audit C2): a
+    // localStorage failure throws from logWeight → show a real error instead.
+    try {
+      const next = logWeight(parsed); // upsert today's entry → persist + sync
+      setEntries(next);
+      setSaveError(false);
+      setJustSaved(true);
+      window.setTimeout(() => setJustSaved(false), 1600);
+    } catch {
+      setJustSaved(false);
+      setSaveError(true);
+    }
   }
 
   return (
@@ -142,6 +151,7 @@ export function WeightSection({ targetWeightKg }: Props) {
               onChange={(e) => {
                 setInput(e.target.value);
                 setJustSaved(false);
+                setSaveError(false);
               }}
               placeholder={latest ? String(latest.weightKg) : "65.0"}
               className="field pr-10"
@@ -160,9 +170,14 @@ export function WeightSection({ targetWeightKg }: Props) {
             {justSaved ? "保存 ✓" : todayEntry ? "更新" : "記録"}
           </button>
         </div>
-        {todayEntry && !justSaved && (
+        {todayEntry && !justSaved && !saveError && (
           <p className="mt-1 text-xs text-slate-400 dark:text-navy-400">
             今日はすでに {kg(todayEntry.weightKg)} kg で記録済み（上書きできます）
+          </p>
+        )}
+        {saveError && (
+          <p className="mt-1 text-xs font-semibold text-rose-600 dark:text-rose-400">
+            保存に失敗しました。端末の空き容量を確認して、もう一度お試しください。
           </p>
         )}
       </div>

@@ -3,7 +3,7 @@
 > **Status:** Draft v1 (specification only — no app code is implied or authorized by this document).
 > **Owner:** 個人利用者（本人）。トレーニング仲間にカジュアルに見せる可能性あり。
 > **Date:** 2026-06-17
-> **Prototype grounding:** `/home/info/health-app`（logging-only foundation。Next.js 14 App Router / TS strict / Tailwind / localStorage + IndexedDB / `output: "export"` 静的書き出し）を読み込み済み。本 PRD はその基盤の上にフル製品を定義する。
+> **Prototype grounding:** 本リポジトリ `app/` の前身プロトタイプ（logging-only foundation。Next.js 14 App Router / TS strict / Tailwind / localStorage + IndexedDB / `output: "export"` 静的書き出し）を読み込み済み。本 PRD はその基盤の上にフル製品を定義する。
 
 ---
 
